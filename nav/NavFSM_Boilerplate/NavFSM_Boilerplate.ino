@@ -12,6 +12,8 @@
 #include <SoftwareSerial.h>
 #include "ProtoLink.h"
 
+#include <Servo.h>
+
 // ---------------- Pin Map (MADE UP) ----------------
 // Tape sensors (analog reflectance / IR line sensors)
 
@@ -33,13 +35,49 @@ static const uint8_t PIN_STATUS_LED = 13;
 // NAV TO SHOOTER link (SoftwareSerial -- library that sends messages to different arduinos
 static const uint8_t PIN_LINK_RX = 10; // NAV receives on D10  (wired from SHOOTER TX)
 static const uint8_t PIN_LINK_TX = 11; // NAV transmits on D11 (wired to SHOOTER RX)
+
+static const uint8_t PIN_IR_SERVO = 9; 
+static Servo irServo;
+
 SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
+
+// ---- 909 Hz sampling params
+static const int IR_FREQ = 909;
+static const unsigned long IR_PERIOD_US = 1000000UL / IR_FREQ;   // ~1100 us
+static const int IR_SAMPLES_PER_PERIOD = 8;
+static const unsigned long IR_INTERVAL_US = IR_PERIOD_US / IR_SAMPLES_PER_PERIOD; // ~137 us
+
+
+static const int IR_NUM_PERIODS = 5;
+static const int IR_TOTAL_SAMPLES = IR_SAMPLES_PER_PERIOD * IR_NUM_PERIODS; // 40 samples
+
+
+
+// ---- Servo scan params ----
+static const int SERVO_MIN_DEG = 0;
+static const int SERVO_MAX_DEG = 180;
+static const int SERVO_FWD_DEG = 90;
+
+// coarse scan step. 6–10 degrees -- subject to change!
+static const int SERVO_STEP_DEG = 6;                // TODO calibrate
+static const uint32_t SERVO_SETTLE_MS = 20;         // TODO calibrate
+
+// store scan results at coarse step positions
+static const int SCAN_POINTS = (SERVO_MAX_DEG - SERVO_MIN_DEG) / SERVO_STEP_DEG + 1;
+static int irAmp[SCAN_POINTS];          // amplitude per scan index
+static int irAngle[SCAN_POINTS];        // angle per scan index
+static int scanIdx = 0;
+
+// to prevent picking two peaks that are basically the same beacon lobe
+static const int MIN_PEAK_SEPARATION_DEG = 25;      // TODO calibrate
+
 
 
 
 // ---------------- CONSTANTS -- NEED REFINING I DO NOT KNOW WHAT THEY ARE  ----------------
 static const int   TAPE_THRESHOLD = 600;   // TODO: calibrate
-static const int   IR_THRESHOLD   = 200;   // TODO: calibrate
+
+// static const int   IR_THRESHOLD   = 200;   // TODO: calibrate
 
 static const int16_t SPEED_FWD    = 80;    // TODO: calibrate
 static const int16_t SPEED_TURN   = 70;    // TODO: calibrate
@@ -49,19 +87,19 @@ static const int16_t SPEED_TURN   = 70;    // TODO: calibrate
 // TODO: need these values
 static const float MS_PER_DEG_TURN = 8.0f;
 
-// Tape-follow speed
-// TODO: replace with actual values
+
+// Tape-follow speed -- Basically modify the motors by this amount if they are too left or right of the tape
 static const int16_t SPEED_DELTA = 35;
 
 // Hog line detection behavior
-static const uint32_t HOGLINE_DEBOUNCE_MS = 120; // TODO: tune
+static const uint32_t HOGLINE_DEBOUNCE_MS = 120;  //TODO: calibrate
 
 // Volley config
-static const uint8_t DEFAULT_SHOTS_PER_VOLLEY = 3; // TODO: set from UI / DIP switch / Serial
-static const uint16_t DEFAULT_DISTANCE_METRIC = 0; // TODO: compute from IR/odometry/etc
+static const uint8_t DEFAULT_SHOTS_PER_VOLLEY = 3;    // TODO: set from UI / DIP switch / Serial
+static const uint16_t DEFAULT_DISTANCE_METRIC = 0;    // TODO: compute from IR/odometry/etc
 
 // Reload waiting
-static const uint32_t RELOAD_WAIT_MS = 12000; // 10–15 seconds, TODO: tune or randomize
+static const uint32_t RELOAD_WAIT_MS = 12000;         // 10–15 seconds, TODO: calibrate
 
 // ---------------- “Hardware Abstraction” ----------------
 // Replace these with actual Raptor calls (or your own motor driver).
@@ -70,7 +108,7 @@ static void motorsStop() {
 }
 
 static void motorsTank(int16_t left, int16_t right) {
-  // TODO: raptor.LeftMtrSpeed(left); raptor.RightMtrSpeed(right);
+  // TODO: 
 }
 
 // ---------------- Simple Timer ----------------
@@ -148,6 +186,185 @@ static SimpleTimer reloadTimer;
 
 static char rxLine[Proto::LINE_MAX];
 
+
+
+static int  readIrAmplitude909Hz();
+static void handleInitOrient();
+static void computeTwoPeaksAndBisector(int &p1Idx, int &p2Idx, int &bisDeg);
+
+
+
+// Actual Scan of to populate the two arrays we need...
+static int readIrAmplitude909Hz() {
+  int min_val = 1023;
+  int max_val = 0;
+
+  unsigned long last_sample_time = micros();
+
+  // Strict cadence sampling
+  for (int i = 0; i < IR_TOTAL_SAMPLES; ) {
+    if (micros() - last_sample_time >= IR_INTERVAL_US) {
+      last_sample_time += IR_INTERVAL_US;
+
+      int val = analogRead(PIN_IR_AMP);
+
+      if (val < min_val) min_val = val;
+      if (val > max_val) max_val = val;
+
+      i++;
+    }
+  }
+  return (max_val - min_val); // peak-to-peak amplitude
+}
+
+
+// Helper for the IR calculation
+
+static void computeTwoPeaksAndBisector(int &p1Idx, int &p2Idx, int &bisDeg) {
+  // Find best peak index (max amplitude)
+  p1Idx = 0;
+  for (int i = 1; i < SCAN_POINTS; i++) {
+    if (irAmp[i] > irAmp[p1Idx]) p1Idx = i;
+  }
+
+  // Find second-best peak far enough away
+  p2Idx = -1;
+  for (int i = 0; i < SCAN_POINTS; i++) {
+    int sep = abs(irAngle[i] - irAngle[p1Idx]);
+    if (sep < MIN_PEAK_SEPARATION_DEG) continue;
+
+    if (p2Idx < 0 || irAmp[i] > irAmp[p2Idx]) {
+      p2Idx = i;
+    }
+  }
+
+  // If no good second peak, fall back to just facing strongest peak
+  if (p2Idx < 0) {
+    bisDeg = irAngle[p1Idx];
+    return;
+  }
+
+  // Bisector between the two peak angles
+  bisDeg = (irAngle[p1Idx] + irAngle[p2Idx]) / 2;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+// IR SENSOR FSM --- ripped from Jackson's IR SENSOR
+
+static void handleInitOrient() {
+  switch (orientPhase) {
+
+    case ORIENT_SCAN_SETTLE:
+      // wait for servo to settle before sampling
+      if (servoSettleTimer.expired()) {
+        orientPhase = ORIENT_SCAN_SAMPLE;
+      }
+      break;
+
+    case ORIENT_SCAN_SAMPLE: {
+      // sample IR amplitude at the current scan angle
+      int amp = readIrAmplitude909Hz();
+      irAmp[scanIdx] = amp;
+
+      // advance scan index
+      scanIdx++;
+
+      if (scanIdx >= SCAN_POINTS) {
+        // finished scanning all angles
+        orientPhase = ORIENT_COMPUTE;
+      } else {
+        // move to next angle and settle
+        int nextAng = irAngle[scanIdx];
+        irServo.write(nextAng);
+        servoSettleTimer.start(SERVO_SETTLE_MS);
+        orientPhase = ORIENT_SCAN_SETTLE;
+      }
+    } break;
+
+    case ORIENT_COMPUTE: {
+      int p1Idx, p2Idx, bisDeg;
+      computeTwoPeaksAndBisector(p1Idx, p2Idx, bisDeg);
+
+      peak1Angle = irAngle[p1Idx];
+      peak2Angle = (p2Idx < 0) ? peak1Angle : irAngle[p2Idx];
+      bisectorAngle = bisDeg;
+
+      // Heading error relative to robot forward direction.
+      // Servo 90° means straight ahead.
+      orientErrorDeg = bisectorAngle - SERVO_FWD_DEG;
+
+      // Convert degrees to time for turning
+      uint32_t turnMs = (uint32_t)(abs(orientErrorDeg) * MS_PER_DEG_TURN);
+
+      // If already aligned, we're done
+      if (turnMs < 30) {
+        motorsStop();
+        orientPhase = ORIENT_IDLE;
+        return;
+      }
+
+      // Choose turn direction:
+      // If bisector is to the right (>90), turn right to bring it to center.
+      // IMPORTANT: You may need to swap these depending on your motor sign convention.
+      if (orientErrorDeg > 0) {
+        // turn right
+        motorsTank(SPEED_TURN, -SPEED_TURN);
+      } else {
+        // turn left
+        motorsTank(-SPEED_TURN, SPEED_TURN);
+      }
+
+      orientTurnTimer.start(turnMs);
+      orientPhase = ORIENT_TURN;
+
+      // Debug prints (optional)
+      Serial.print("[ORIENT] p1="); Serial.print(peak1Angle);
+      Serial.print(" p2="); Serial.print(peak2Angle);
+      Serial.print(" bis="); Serial.print(bisectorAngle);
+      Serial.print(" err="); Serial.print(orientErrorDeg);
+      Serial.print(" turnMs="); Serial.println(turnMs);
+    } break;
+
+    case ORIENT_TURN:
+      if (orientTurnTimer.expired()) {
+        motorsStop();
+        orientPhase = ORIENT_IDLE;
+      }
+      break;
+
+    case ORIENT_IDLE:
+    default:
+      // do nothing
+      break;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // ---------------- Event Tests ----------------
 static bool TestEnablePressed() {
   // Active-low button
@@ -155,9 +372,7 @@ static bool TestEnablePressed() {
 }
 
 static bool TestOrientDone() {
-  // Skeleton: use a timer-based “pretend” orient completes.
-  // TODO: replace with actual IR sweep + computed turn + completion check.
-  return orientTimer.expired();
+  return (orientPhase == ORIENT_IDLE);
 }
 
 static bool TestExitDone() { return exitTimer.expired(); }
@@ -176,7 +391,6 @@ static bool TestHogLineReached() {
 
 static bool TestTurnDone() { return turnTimer.expired(); }
 static bool TestReloadDone() { return reloadTimer.expired(); }
-
 
 
 // Shooter link events
@@ -228,25 +442,39 @@ static void RespReorientDone() { next_state = (shotsLeftTotal > 0) ? EXIT_START_
 static void onEnter(NavState s) {
   switch (s) {
     case NAV_IDLE:
+      digitalWrite(PIN_STATUS_LED, HIGH);
       motorsStop();
-      digitalWrite(PIN_STATUS_LED, LOW);
       break;
 
     case INIT_ORIENT:
       digitalWrite(PIN_STATUS_LED, HIGH);
       motorsStop();
-      // TODO: IR sweep + compute heading + turn
-      orientTimer.start(2500); // skeleton
+      // init scan arrays
+      scanIdx = 0;
+      for (int i = 0; i < SCAN_POINTS; i++) {
+        irAmp[i] = 0;
+        irAngle[i] = SERVO_MIN_DEG + i * SERVO_STEP_DEG;
+      }
+
+
+      // begin scan at SERVO_MIN
+      irServo.write(SERVO_MIN_DEG);
+      servoSettleTimer.start(SERVO_SETTLE_MS);
+
+      orientPhase = ORIENT_SCAN_SETTLE;
       break;
 
     case EXIT_START_ZONE:
       motorsTank(SPEED_FWD, SPEED_FWD);
-      exitTimer.start(1200); // TODO tune
+
+      exitTimer.start(1200);            // TODO calibrate
       break;
+
 
     case SEEK_CENTER_TAPE:
       motorsTank(SPEED_TURN, -SPEED_TURN);
       break;
+
 
     case ALIGN_TO_TAPE:
       // handled in loop (non-blocking)
@@ -329,7 +557,8 @@ static void handleFollowToHogline(bool headingOut) {
   } else if (bits & TAPE_RIGHT) {
     left += SPEED_DELTA; right -= SPEED_DELTA;
   } else {
-    // TODO: line recovery
+
+    // TODO: LINE RECOVERY -- NOT REALLY COVERED
     left = 0; right = 0;
   }
 
@@ -349,8 +578,9 @@ static void checkGlobalEvents() {
 
   if (!enableLatched && state == NAV_IDLE && TestEnablePressed()) RespToEnable();
 
-  if (state == INIT_ORIENT && TestOrientDone()) {
-    RespOrientDone();
+  if (state == INIT_ORIENT) {
+    handleInitOrient(); 
+    if (TestOrientDone()) RespOrientDone();
 
   } else if (state == EXIT_START_ZONE && TestExitDone()) {
     RespExitDone();
@@ -389,6 +619,8 @@ static void checkGlobalEvents() {
   }
 }
 
+
+
 // ---------------- Arduino setup/loop ----------------
 void setup() {
   pinMode(PIN_ENABLE_BTN, INPUT_PULLUP);
@@ -399,7 +631,14 @@ void setup() {
 
   Serial.println("[NAV] boot");
 
-  // TODO: init Raptor + motors off
+  bitClear(ADCSRA, ADPS0);
+  bitSet(ADCSRA, ADPS1);
+  bitSet(ADCSRA, ADPS2);
+
+  irServo.attach(PIN_IR_SERVO);
+  irServo.write(SERVO_FWD_DEG);
+
+  // TODO: motors off
   motorsStop();
 
   state = NAV_IDLE;
@@ -407,6 +646,8 @@ void setup() {
   prev_state = (NavState)255;
   onEnter(state);
 }
+
+
 
 void loop() {
   checkGlobalEvents();
