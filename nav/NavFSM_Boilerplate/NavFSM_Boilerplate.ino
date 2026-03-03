@@ -20,7 +20,6 @@
 
 /* ASSUMPTION -- I DO NOT KNOW HOW MANY TAPE SENSORS WE HAVE*/
 static const uint8_t PIN_TAPE_L = A0;
-static const uint8_t PIN_TAPE_C = A1;
 static const uint8_t PIN_TAPE_R = A2;
 
 // IR sensor analog input for beacon intensity
@@ -134,12 +133,10 @@ static uint8_t readTapeBits() {
   // ASSUMPTION higher ADC means “darker tape” (common for reflectance sensors),
 
   int l = analogRead(PIN_TAPE_L);
-  int c = analogRead(PIN_TAPE_C);
   int r = analogRead(PIN_TAPE_R);
 
   uint8_t bits = TAPE_NONE;
   if (l > TAPE_THRESHOLD) bits |= TAPE_LEFT;
-  if (c > TAPE_THRESHOLD) bits |= TAPE_CENTER;
   if (r > TAPE_THRESHOLD) bits |= TAPE_RIGHT;
   return bits;
 }
@@ -147,8 +144,8 @@ static uint8_t readTapeBits() {
 static bool isTapeCrossing(uint8_t bits) {
   // Assuming that "crossing" means that multiple sensors see tape at once.
   // TODO: refine 
-  uint8_t count = ((bits & TAPE_LEFT) ? 1 : 0) + ((bits & TAPE_CENTER) ? 1 : 0) + ((bits & TAPE_RIGHT) ? 1 : 0);
-  return count >= 2;
+  uint8_t count = ((bits & TAPE_LEFT) ? 1 : 0) + ((bits & TAPE_RIGHT) ? 1 : 0);
+  return count == 2;
 }
 
 // ---------------- NAV FSM ----------------
@@ -571,6 +568,10 @@ static void handleFollowToHogline(bool headingOut) {
   }
 }
 
+
+
+
+
 // ---------------- Global Event Checking ----------------
 static void checkGlobalEvents() {
   next_state = state;
@@ -621,6 +622,9 @@ static void checkGlobalEvents() {
 
 
 
+
+
+
 // ---------------- Arduino setup/loop ----------------
 void setup() {
   pinMode(PIN_ENABLE_BTN, INPUT_PULLUP);
@@ -638,7 +642,8 @@ void setup() {
   irServo.attach(PIN_IR_SERVO);
   irServo.write(SERVO_FWD_DEG);
 
-  // TODO: motors off
+  
+  // MOTORS OFF
   motorsStop();
 
   state = NAV_IDLE;
