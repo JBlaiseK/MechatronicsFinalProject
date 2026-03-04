@@ -16,6 +16,8 @@ static const uint8_t PIN_LINK_RX = 10; // SHOOTER receives on D10 (wired from NA
 static const uint8_t PIN_LINK_TX = 11; // SHOOTER transmits on D11 (wired to NAV RX)
 SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
 
+
+
 // Loader motor (ball+chain) — assume H-bridge or motor driver
 static const uint8_t PIN_LOAD_PWM = 5;
 static const uint8_t PIN_LOAD_DIR = 4;
