@@ -7,7 +7,7 @@
 // ===================== STAGE SELECT HERE ====================
 
 // CHANGE THIS ONE LINE:
-static const uint8_t STAGE_MODE = 0;     // 0 = FULL_FSM, 1..15 = tests (see list below)
+static const uint8_t STAGE_MODE = 0;  // 0 = FULL_FSM, 1..15 = tests (see list below)
 
 // Safety gate: robot will not move unless true.
 static const bool TEST_ENABLE_MOTORS = false;
@@ -24,11 +24,12 @@ static const bool TEST_ENABLE_MOTORS = false;
     6  = IR_ORIENT_ONLY                 (scan + wheel turn)
     7  = EXIT_BOX_UNTIL_CROSS
     8  = LINE_FOLLOW_UNTIL_HOG
+
+
     9  = TURN_90_TIMED
     10 = TURN_180_TIMED
-
-
     11 = MOTORS_CONSTANT_FORWARD
+
     12 = MOTORS_TOGGLE_DIRECTION_DEMO
     13 = SHOOTER_LINK_MONITOR
     14 = SHOOTER_FIRE_ONCE
