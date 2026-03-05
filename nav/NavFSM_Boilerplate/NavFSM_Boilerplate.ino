@@ -20,10 +20,10 @@ struct SimpleTimer {
 // ===================== STAGE SELECT HERE ====================
 
 // CHANGE THIS ONE LINE:
-static const uint8_t STAGE_MODE = 11;     // 0 = FULL_FSM, 1..15 = tests (see list below)
+static const uint8_t STAGE_MODE = 1;     // 0 = FULL_FSM, 1..15 = tests (see list below)
 
 // Safety gate: robot will not move unless true.
-static const bool TEST_ENABLE_MOTORS = true;
+static const bool TEST_ENABLE_MOTORS = false;
 
 /*
   STAGE MODES:
@@ -74,8 +74,8 @@ static const bool TEST_ENABLE_MOTORS = true;
 
   
   static const uint8_t PIN_R_ENA = 10;  // PWM
-  static const uint8_t PIN_R_IN1 = 11; 
-  static const uint8_t PIN_R_IN2 = 12;
+  static const uint8_t PIN_R_IN1 = 12; 
+  static const uint8_t PIN_R_IN2 = 11;
 
 
   // // Status LED
@@ -99,13 +99,13 @@ static const bool TEST_ENABLE_MOTORS = true;
 
 // -------- Tape + motion --------
 static const int   TAPE_THRESHOLD = 600;    // TODO calibrate using STAGE 1
-static const int16_t SPEED_FWD    = 150;     // TODO calibrate
-static const int16_t SPEED_TURN   = 70;     // TODO calibrate
+static const int16_t SPEED_FWD    = 255;     // TODO calibrate
+static const int16_t SPEED_TURN   = 255;     // TODO calibrate
 static const int16_t SPEED_SEARCH = 55;     // recovery turn when tape lost
 static const int16_t SPEED_DELTA  = 35;     // tape-follow steering delta
 
 // Robot turn calibration ONLY (wheel motors)
-static const float MS_PER_DEG_ROBOT = 8.0f; // TODO calibrate using STAGE 9/10
+static const float MS_PER_DEG_ROBOT = 16.0f; // TODO calibrate using STAGE 9/10
 
 // Tape crossing debounce
 static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 120;
@@ -1018,11 +1018,12 @@ static void stageTurnTimed(float deg) {
     Serial.println(ms);
 
     // Default "right turn" assumption; verify for your wiring
-    safeMotorsTank(SPEED_TURN, -SPEED_TURN);
+    safeMotorsTank(-SPEED_TURN, SPEED_TURN);
     sTurn.start(ms);
   }
 
   if (sTurn.expired()) {
+    
     safeMotorsStop();
     markStageDone("Timed turn complete.");
   }
@@ -1190,8 +1191,8 @@ void setup() {
   bitSet(ADCSRA, ADPS2);
 
   // Servo init
-  irServo.attach(PIN_IR_SERVO);
-  irServo.write(SERVO_FWD_DEG);
+  // irServo.attach(PIN_IR_SERVO);
+  // irServo.write(SERVO_FWD_DEG);
 
   pinMode(PIN_L_ENA, OUTPUT);
   pinMode(PIN_L_IN1, OUTPUT);
