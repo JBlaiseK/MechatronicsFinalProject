@@ -20,7 +20,7 @@ struct SimpleTimer {
 // ===================== STAGE SELECT HERE ====================
 
 // CHANGE THIS ONE LINE:
-static const uint8_t STAGE_MODE = 1;     // 0 = FULL_FSM, 1..15 = tests (see list below)
+static const uint8_t STAGE_MODE = 2;     // 0 = FULL_FSM, 1..15 = tests (see list below)
 
 // Safety gate: robot will not move unless true.
 static const bool TEST_ENABLE_MOTORS = false;
@@ -52,11 +52,13 @@ static const bool TEST_ENABLE_MOTORS = false;
 
 // ========================= Pin Map ===========================
   // IR sensor analog input (amplitude after op-amp)
-  static const uint8_t PIN_IR_AMP = A0;
+  // static const uint8_t PIN_IR_AMP = A0;
 
-  // Tape sensors (LEFT + RIGHT only)
-  static const uint8_t PIN_TAPE_L = A1;
-  static const uint8_t PIN_TAPE_R = A2;
+  // Tape sensors: outer-left, inner-left, inner-right, outer-right
+  static const uint8_t PIN_TAPE_LO = A1;   // left outer
+  static const uint8_t PIN_TAPE_LI = A2;   // left inner
+  static const uint8_t PIN_TAPE_RI = A4;   // right inner
+  static const uint8_t PIN_TAPE_RO = A5;   // right outer
 
 
   // Servo that sweeps IR sensor
@@ -98,9 +100,14 @@ static const bool TEST_ENABLE_MOTORS = false;
 
 
 // -------- Tape + motion --------
-static const int   TAPE_THRESHOLD = 600;    // TODO calibrate using STAGE 1
+static const int TAPE_THRESH_LO = 200;
+static const int TAPE_THRESH_LI = 200;
+static const int TAPE_THRESH_RI = 200;
+static const int TAPE_THRESH_RO = 200;
+
 static const int16_t SPEED_FWD    = 255;     // TODO calibrate
 static const int16_t SPEED_TURN   = 255;     // TODO calibrate
+
 static const int16_t SPEED_SEARCH = 55;     // recovery turn when tape lost
 static const int16_t SPEED_DELTA  = 35;     // tape-follow steering delta
 
@@ -221,23 +228,48 @@ static void safeMotorsStop() {
 
 enum TapeBits : uint8_t {
   TAPE_NONE  = 0,
-  TAPE_LEFT  = 1 << 0,
-  TAPE_RIGHT = 1 << 1
+  TAPE_LO    = 1 << 0,   // left outer
+  TAPE_LI    = 1 << 1,   // left inner
+  TAPE_RI    = 1 << 2,   // right inner
+  TAPE_RO    = 1 << 3    // right outer
 };
 
 static uint8_t readTapeBits() {
-  int l = analogRead(PIN_TAPE_L);
-  int r = analogRead(PIN_TAPE_R);
+  int lo = readAnalogSettled(PIN_TAPE_LO);
+  int li = readAnalogSettled(PIN_TAPE_LI);
+  int ri = readAnalogSettled(PIN_TAPE_RI);
+  int ro = readAnalogSettled(PIN_TAPE_RO);
 
   uint8_t bits = TAPE_NONE;
-  if (l > TAPE_THRESHOLD) bits |= TAPE_LEFT;
-  if (r > TAPE_THRESHOLD) bits |= TAPE_RIGHT;
+  if (lo > TAPE_THRESHOLD) bits |= TAPE_LO;
+  if (li > TAPE_THRESHOLD) bits |= TAPE_LI;
+  if (ri > TAPE_THRESHOLD) bits |= TAPE_RI;
+  if (ro > TAPE_THRESHOLD) bits |= TAPE_RO;
+
   return bits;
 }
 
+
+
+
 static bool isTapeCrossing(uint8_t bits) {
-  return (bits & TAPE_LEFT) && (bits & TAPE_RIGHT);
+  bool li = bits & TAPE_LI;
+  bool ri = bits & TAPE_RI;
+  bool lo = bits & TAPE_LO;
+  bool ro = bits & TAPE_RO;
+
+  // Strong crossing evidence:
+  // - both inner sensors see tape, OR
+  // - 3 or more sensors see tape
+  uint8_t count = 0;
+  if (lo) count++;
+  if (li) count++;
+  if (ri) count++;
+  if (ro) count++;
+
+  return (li && ri) || (count >= 3);
 }
+
 
 static bool crossingDebounced(SimpleTimer &deb, uint32_t debounceMs) {
   uint8_t bits = readTapeBits();
@@ -257,12 +289,18 @@ static bool crossingDebounced(SimpleTimer &deb, uint32_t debounceMs) {
 static int8_t lastTapeSide = 0;
 
 static void updateTapeMemory(uint8_t bits) {
-  bool L = bits & TAPE_LEFT;
-  bool R = bits & TAPE_RIGHT;
+  int leftScore = 0;
+  int rightScore = 0;
 
-  if (L && !R) lastTapeSide = -1;
-  else if (!L && R) lastTapeSide = +1;
-  else if (L && R) lastTapeSide = 0;
+  if (bits & TAPE_LO) leftScore += 2;
+  if (bits & TAPE_LI) leftScore += 1;
+
+  if (bits & TAPE_RO) rightScore += 2;
+  if (bits & TAPE_RI) rightScore += 1;
+
+  if (leftScore > rightScore) lastTapeSide = -1;
+  else if (rightScore > leftScore) lastTapeSide = +1;
+  else lastTapeSide = 0;
 }
 
 
@@ -272,19 +310,57 @@ static void lineFollowStep() {
   uint8_t bits = readTapeBits();
   updateTapeMemory(bits);
 
-  bool L = bits & TAPE_LEFT;
-  bool R = bits & TAPE_RIGHT;
+  bool lo = bits & TAPE_LO;
+  bool li = bits & TAPE_LI;
+  bool ri = bits & TAPE_RI;
+  bool ro = bits & TAPE_RO;
 
-  if (L && R) {
+  // 1) centered / good lock
+  if (li && ri && !lo && !ro) {
     safeMotorsTank(SPEED_FWD, SPEED_FWD);
-  } else if (L && !R) {
+    return;
+  }
+
+  // 2) strong crossing / broad tape region
+  if (isTapeCrossing(bits)) {
+    safeMotorsTank(SPEED_FWD, SPEED_FWD);
+    return;
+  }
+
+  // 3) slight left drift:
+  // line is more under left-inner than right-inner,
+  // so steer left a bit
+  if (li && !ri && !lo) {
     safeMotorsTank(SPEED_FWD - SPEED_DELTA, SPEED_FWD + SPEED_DELTA);
-  } else if (!L && R) {
+    return;
+  }
+
+  // 4) slight right drift
+  if (ri && !li && !ro) {
     safeMotorsTank(SPEED_FWD + SPEED_DELTA, SPEED_FWD - SPEED_DELTA);
+    return;
+  }
+
+  // 5) strong left deviation: outer-left sees line
+  if (lo) {
+    safeMotorsTank(SPEED_FWD - 2 * SPEED_DELTA, SPEED_FWD + 2 * SPEED_DELTA);
+    return;
+  }
+
+  // 6) strong right deviation: outer-right sees line
+  if (ro) {
+    safeMotorsTank(SPEED_FWD + 2 * SPEED_DELTA, SPEED_FWD - 2 * SPEED_DELTA);
+    return;
+  }
+
+  // 7) lost tape completely -> recovery using memory
+  if (lastTapeSide < 0) {
+    safeMotorsTank(-SPEED_SEARCH, SPEED_SEARCH);
+  } else if (lastTapeSide > 0) {
+    safeMotorsTank(SPEED_SEARCH, -SPEED_SEARCH);
   } else {
-    // lost tape
-    if (lastTapeSide < 0) safeMotorsTank(-SPEED_SEARCH, SPEED_SEARCH);
-    else                  safeMotorsTank(SPEED_SEARCH, -SPEED_SEARCH);
+    // no clue where tape went, creep forward
+    safeMotorsTank(SPEED_SEARCH, SPEED_SEARCH);
   }
 }
 
@@ -844,18 +920,26 @@ static void stageTapeMonitorRaw() {
   safeMotorsStop();
 
   static uint32_t last = 0;
-  if (millis() - last < 100) return;
+  if (millis() - last < 120) return;
   last = millis();
 
-  int l = analogRead(PIN_TAPE_L);
-  int r = analogRead(PIN_TAPE_R);
+  int lo = readAnalogSettled(PIN_TAPE_LO);
+  int li = readAnalogSettled(PIN_TAPE_LI);
+  int ri = readAnalogSettled(PIN_TAPE_RI);
+  int ro = readAnalogSettled(PIN_TAPE_RO);
+
   uint8_t bits = readTapeBits();
 
-  Serial.print("[TAPE] L="); Serial.print(l);
-  Serial.print(" R="); Serial.print(r);
+  Serial.print("[TAPE] ");
+  Serial.print("LO="); Serial.print(lo);
+  Serial.print(" LI="); Serial.print(li);
+  Serial.print(" RI="); Serial.print(ri);
+  Serial.print(" RO="); Serial.print(ro);
   Serial.print(" bits=");
-  Serial.print((bits & TAPE_LEFT) ? "L" : ".");
-  Serial.println((bits & TAPE_RIGHT) ? "R" : ".");
+  Serial.print((bits & TAPE_LO) ? "LO " : ".. ");
+  Serial.print((bits & TAPE_LI) ? "LI " : ".. ");
+  Serial.print((bits & TAPE_RI) ? "RI " : ".. ");
+  Serial.println((bits & TAPE_RO) ? "RO" : "..");
 }
 
 // ---- Stage 2: ultrasonic monitor ----
@@ -1172,6 +1256,11 @@ void setup() {
   pinMode(PIN_ENABLE_BTN, INPUT_PULLUP);
   pinMode(PIN_STATUS_LED, OUTPUT);
 
+  pinMode(PIN_TAPE_LO, INPUT);
+  pinMode(PIN_TAPE_LI, INPUT);
+  pinMode(PIN_TAPE_RI, INPUT);
+  pinMode(PIN_TAPE_RO, INPUT);
+
   // Ultrasonic pins
   pinMode(PIN_US_TRIG, OUTPUT);
   pinMode(PIN_US_ECHO, INPUT);
@@ -1181,14 +1270,21 @@ void setup() {
   // link.begin(19200);
 
   Serial.println("[NAV] boot");
-  Serial.println("[NAV] STAGE_MODE="); Serial.print(STAGE_MODE);
-  Serial.println(" ("); Serial.print(stageName(STAGE_MODE)); Serial.println(")");
+
+  Serial.print("[NAV] STAGE_MODE=");
+  Serial.print(STAGE_MODE);
+  Serial.print(" (");
+  Serial.print(stageName(STAGE_MODE));
+  Serial.println(")");
+
   Serial.println("[NAV] TEST_ENABLE_MOTORS="); Serial.println(TEST_ENABLE_MOTORS ? "true" : "false");
 
   // Speed up ADC (your prescaler trick)
-  bitClear(ADCSRA, ADPS0);
-  bitSet(ADCSRA, ADPS1);
-  bitSet(ADCSRA, ADPS2);
+  // bitClear(ADCSRA, ADPS0);
+  // bitSet(ADCSRA, ADPS1);
+  // bitSet(ADCSRA, ADPS2);
+
+  analogReference(DEFAULT);
 
   // Servo init
   // irServo.attach(PIN_IR_SERVO);
@@ -1239,9 +1335,32 @@ void setup() {
   
 }
 
+static int readAnalogSettled(uint8_t pin) {
+  (void)analogRead(pin);          // throw away (mux settle)
+  delayMicroseconds(200);
+  (void)analogRead(pin);          // throw away again
+  delayMicroseconds(200);
+  return analogRead(pin);
+}
+
+static void stageAnalogPinScan() {
+  static uint32_t last = 0;
+  if (millis() - last < 250) return;
+  last = millis();
+
+  for (int i = 0; i < 6; i++) {
+    int v = readAnalogSettled(A0 + i);
+    Serial.print("A"); Serial.print(i);
+    Serial.print("="); Serial.print(v);
+    Serial.print("  ");
+  }
+  Serial.println();
+}
+
 void loop() {
   switch (STAGE_MODE) {
     case 0:  fullFsmLoop();                 break;
+    // case 1: stageAnalogPinScan(); break;
     case 1:  stageTapeMonitorRaw();         break;
     case 2:  stageUltrasonicMonitor();      break;
     case 3:  stageIrAmplitudeMonitor();     break;
