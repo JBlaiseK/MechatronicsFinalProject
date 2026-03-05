@@ -42,6 +42,7 @@ static const bool TEST_ENABLE_MOTORS = true;
     10 = TURN_180_TIMED
     11 = MOTORS_CONSTANT_FORWARD
 
+
     12 = MOTORS_TOGGLE_DIRECTION_DEMO
     13 = SHOOTER_LINK_MONITOR
     14 = SHOOTER_FIRE_ONCE
@@ -50,56 +51,55 @@ static const bool TEST_ENABLE_MOTORS = true;
 
 
 // ========================= Pin Map ===========================
-// IR sensor analog input (amplitude after op-amp)
-static const uint8_t PIN_IR_AMP = A0;
+  // IR sensor analog input (amplitude after op-amp)
+  static const uint8_t PIN_IR_AMP = A0;
 
-// Tape sensors (LEFT + RIGHT only)
-static const uint8_t PIN_TAPE_L = A1;
-static const uint8_t PIN_TAPE_R = A2;
-
-
-// Servo that sweeps IR sensor
-static const uint8_t PIN_IR_SERVO = 9;
-static Servo irServo;
-
-// Enable button (active-low)
-static const uint8_t PIN_ENABLE_BTN = 2;
+  // Tape sensors (LEFT + RIGHT only)
+  static const uint8_t PIN_TAPE_L = A1;
+  static const uint8_t PIN_TAPE_R = A2;
 
 
+  // Servo that sweeps IR sensor
+  static const uint8_t PIN_IR_SERVO = 2;
+  static Servo irServo;
 
-// MOTORS
-static const uint8_t PIN_L_ENA = 9;  // PWM
-static const uint8_t PIN_L_IN1 = 8;
-static const uint8_t PIN_L_IN2 = 7;
-
- 
-static const uint8_t PIN_R_ENA = 10;  // PWM
-static const uint8_t PIN_R_IN1 = 11; 
-static const uint8_t PIN_R_IN2 = 12;
+  // Enable button (active-low)
+  static const uint8_t PIN_ENABLE_BTN = 4;
 
 
-// // Status LED
-static const uint8_t PIN_STATUS_LED = 13;
+  // MOTORS
+  static const uint8_t PIN_L_ENA = 9;  // PWM
+  static const uint8_t PIN_L_IN1 = 8;
+  static const uint8_t PIN_L_IN2 = 7;
 
-// NAV <-> SHOOTER link (SoftwareSerial)
-static const uint8_t PIN_LINK_RX = 10; // NAV receives on D10
-static const uint8_t PIN_LINK_TX = 11; // NAV transmits on D11
+  
+  static const uint8_t PIN_R_ENA = 10;  // PWM
+  static const uint8_t PIN_R_IN1 = 11; 
+  static const uint8_t PIN_R_IN2 = 12;
 
-SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
+
+  // // Status LED
+  static const uint8_t PIN_STATUS_LED = 13;
+
+  // // NAV <-> SHOOTER link (SoftwareSerial)
+  // static const uint8_t PIN_LINK_RX = 10; // NAV receives on D10
+  // static const uint8_t PIN_LINK_TX = 11; // NAV transmits on D11
+
+  // SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
 
 
-// Ultrasonic (HC-SR04 style)
-static const uint8_t PIN_US_TRIG = 10;
-static const uint8_t PIN_US_ECHO = 11;
+  // Ultrasonic (HC-SR04 style)
+  static const uint8_t PIN_US_TRIG = 5;
+  static const uint8_t PIN_US_ECHO = 6;
 
-// ======================== Constants ==========================
+  // ======================== Constants ==========================
 
 
 
 
 // -------- Tape + motion --------
 static const int   TAPE_THRESHOLD = 600;    // TODO calibrate using STAGE 1
-static const int16_t SPEED_FWD    = 80;     // TODO calibrate
+static const int16_t SPEED_FWD    = 150;     // TODO calibrate
 static const int16_t SPEED_TURN   = 70;     // TODO calibrate
 static const int16_t SPEED_SEARCH = 55;     // recovery turn when tape lost
 static const int16_t SPEED_DELTA  = 35;     // tape-follow steering delta
@@ -367,36 +367,36 @@ static uint8_t lastVolleyFired = 0;
 
 static char rxLine[Proto::LINE_MAX];
 
-static void pollShooterLink() {
-  // Drain all available lines each loop
-  while (Proto::readLine(link, rxLine, sizeof(rxLine))) {
-    Proto::AckMsg ack;
-    Proto::DoneMsg done;
+// static void pollShooterLink() {
+//   // Drain all available lines each loop
+//   while (Proto::readLine(link, rxLine, sizeof(rxLine))) {
+//     Proto::AckMsg ack;
+//     Proto::DoneMsg done;
 
-    if (Proto::parseAck(rxLine, ack)) {
-      Serial.print("[NAV] shooter ACK seq="); Serial.println(ack.seq);
-      continue;
-    }
+//     if (Proto::parseAck(rxLine, ack)) {
+//       Serial.print("[NAV] shooter ACK seq="); Serial.println(ack.seq);
+//       continue;
+//     }
 
-    if (Proto::parseDone(rxLine, done)) {
-      Serial.print("[NAV] shooter DONE seq="); Serial.print(done.seq);
-      Serial.print(" fired="); Serial.println(done.fired);
+//     if (Proto::parseDone(rxLine, done)) {
+//       Serial.print("[NAV] shooter DONE seq="); Serial.print(done.seq);
+//       Serial.print(" fired="); Serial.println(done.fired);
 
-      shooterBusy = false;
-      lastVolleyFired = done.fired;
+//       shooterBusy = false;
+//       lastVolleyFired = done.fired;
 
-      if (shotsLeftTotal >= done.fired) shotsLeftTotal -= done.fired;
-      else shotsLeftTotal = 0;
+//       if (shotsLeftTotal >= done.fired) shotsLeftTotal -= done.fired;
+//       else shotsLeftTotal = 0;
 
-      continue;
-    }
+//       continue;
+//     }
 
-    Serial.print("[NAV] ??? "); Serial.println(rxLine);
-  }
-}
+//     Serial.print("[NAV] ??? "); Serial.println(rxLine);
+//   }
+// }
 
 static void sendFireOnce(uint8_t shots, uint16_t dist) {
-  Proto::sendFire(link, cmdSeq, shots, dist);
+  // Proto::sendFire(link, cmdSeq, shots, dist);
   Serial.print("[NAV] sent FIRE seq="); Serial.print(cmdSeq);
   Serial.print(" shots="); Serial.print(shots);
   Serial.print(" dist="); Serial.println(dist);
@@ -616,7 +616,7 @@ static void startTimedTurnRight(float deg) {
 }
 
 static void fullFsmLoop() {
-  pollShooterLink();
+  // pollShooterLink();
 
   switch (fullState) {
 
@@ -1106,7 +1106,7 @@ static void stageMotorToggleDemo() {
 // ---- Stage 13: shooter link monitor ----
 static void stageShooterLinkMonitor() {
   safeMotorsStop();
-  pollShooterLink();
+  // pollShooterLink();
 
   static uint32_t last = 0;
   if (millis() - last > 500) {
@@ -1129,7 +1129,7 @@ static void stageShooterFireOnce() {
     safeMotorsStop();
   }
 
-  pollShooterLink();
+  // pollShooterLink();
 
   if (!sent) {
     if (shotsLeftTotal == 0) {
@@ -1177,12 +1177,12 @@ void setup() {
   digitalWrite(PIN_US_TRIG, LOW);
 
   Serial.begin(115200);
-  link.begin(19200);
+  // link.begin(19200);
 
   Serial.println("[NAV] boot");
-  Serial.print("[NAV] STAGE_MODE="); Serial.print(STAGE_MODE);
-  Serial.print(" ("); Serial.print(stageName(STAGE_MODE)); Serial.println(")");
-  Serial.print("[NAV] TEST_ENABLE_MOTORS="); Serial.println(TEST_ENABLE_MOTORS ? "true" : "false");
+  Serial.println("[NAV] STAGE_MODE="); Serial.print(STAGE_MODE);
+  Serial.println(" ("); Serial.print(stageName(STAGE_MODE)); Serial.println(")");
+  Serial.println("[NAV] TEST_ENABLE_MOTORS="); Serial.println(TEST_ENABLE_MOTORS ? "true" : "false");
 
   // Speed up ADC (your prescaler trick)
   bitClear(ADCSRA, ADPS0);
@@ -1221,7 +1221,21 @@ void setup() {
   // FULL FSM reset
   fullFsmResetRun();
 
+  Serial.println("SERVO pin="); Serial.println(PIN_IR_SERVO);
+  Serial.println("L_ENA="); Serial.println(PIN_L_ENA);
+  Serial.println("L_IN1="); Serial.println(PIN_L_IN1);
+  Serial.println("L_IN2="); Serial.println(PIN_L_IN2);
+  Serial.println("R_ENA="); Serial.println(PIN_R_ENA);
+  Serial.println("R_IN1="); Serial.println(PIN_R_IN1);
+  Serial.println("R_IN2="); Serial.println(PIN_R_IN2);
+  Serial.println("US_TRIG="); Serial.println(PIN_US_TRIG);
+  Serial.println("US_ECHO="); Serial.println(PIN_US_ECHO);
+
+
   Serial.println("[NAV] ready");
+
+
+  
 }
 
 void loop() {
