@@ -3,15 +3,27 @@
 #include "ProtoLink.h"
 #include <Servo.h>
 
-// ============================================================
+
+// ========================= Timers ============================
+struct SimpleTimer {
+  uint32_t t0 = 0;
+  uint32_t dur = 0;
+  bool running = false;
+
+  void start(uint32_t durationMs) { t0 = millis(); dur = durationMs; running = true; }
+  void stop() { running = false; }
+  bool expired() const { return running && (uint32_t)(millis() - t0) >= dur; }
+};
+
+
+
 // ===================== STAGE SELECT HERE ====================
 
 // CHANGE THIS ONE LINE:
-static const uint8_t STAGE_MODE = 0;  // 0 = FULL_FSM, 1..15 = tests (see list below)
+static const uint8_t STAGE_MODE = 11;     // 0 = FULL_FSM, 1..15 = tests (see list below)
 
 // Safety gate: robot will not move unless true.
-static const bool TEST_ENABLE_MOTORS = false;
-
+static const bool TEST_ENABLE_MOTORS = true;
 
 /*
   STAGE MODES:
@@ -38,7 +50,6 @@ static const bool TEST_ENABLE_MOTORS = false;
 
 
 // ========================= Pin Map ===========================
-
 // IR sensor analog input (amplitude after op-amp)
 static const uint8_t PIN_IR_AMP = A0;
 
@@ -67,28 +78,23 @@ static const uint8_t PIN_R_IN1 = 11;
 static const uint8_t PIN_R_IN2 = 12;
 
 
-
-
 // // Status LED
-// static const uint8_t PIN_STATUS_LED = 13;
+static const uint8_t PIN_STATUS_LED = 13;
 
-// // NAV <-> SHOOTER link (SoftwareSerial)
+// NAV <-> SHOOTER link (SoftwareSerial)
+static const uint8_t PIN_LINK_RX = 10; // NAV receives on D10
+static const uint8_t PIN_LINK_TX = 11; // NAV transmits on D11
 
-
-// // ADD SOON
-// static const uint8_t PIN_LINK_RX = 10; // NAV receives on D10 (wired from SHOOTER TX)
-// static const uint8_t PIN_LINK_TX = 11; // NAV transmits on D11 (wired to SHOOTER RX)
-
-
-// SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
+SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
 
 
 // Ultrasonic (HC-SR04 style)
 static const uint8_t PIN_US_TRIG = 10;
 static const uint8_t PIN_US_ECHO = 11;
 
-
 // ======================== Constants ==========================
+
+
 
 
 // -------- Tape + motion --------
@@ -101,37 +107,30 @@ static const int16_t SPEED_DELTA  = 35;     // tape-follow steering delta
 // Robot turn calibration ONLY (wheel motors)
 static const float MS_PER_DEG_ROBOT = 8.0f; // TODO calibrate using STAGE 9/10
 
-
 // Tape crossing debounce
 static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 120;
 static const uint32_t HOGLINE_DEBOUNCE_MS    = 120;
 
-
 // Exit box fallback timeout
 static const uint32_t EXIT_TIMEOUT_MS = 2500;
-
 
 // -------- Shooter config --------
 static const uint8_t  DEFAULT_SHOTS_PER_VOLLEY = 3;
 static const uint16_t DEFAULT_DISTANCE_METRIC  = 0;
 
-
 // -------- Reload wait (FULL FSM only) --------
 static const uint32_t RELOAD_WAIT_MS = 12000;
-
 
 // -------- Ultrasonic --------
 static const uint32_t US_PING_INTERVAL_MS = 60;
 static const uint32_t US_ECHO_TIMEOUT_US  = 25000;
 static const float    US_CM_PER_US        = 0.0343f / 2.0f;
 
-
 // Hysteresis / debounce
 static const float    US_NEAR_WALL_CM  = 12.0f;
 static const float    US_CLEAR_WALL_CM = 25.0f;
 static const uint8_t  US_NEAR_N        = 3;
 static const uint8_t  US_CLEAR_N       = 3;
-
 
 // -------- IR 909Hz sampling (your method) --------
 static const int IR_FREQ = 909;
@@ -141,13 +140,10 @@ static const unsigned long IR_INTERVAL_US = IR_PERIOD_US / IR_SAMPLES_PER_PERIOD
 static const int IR_NUM_PERIODS = 5;
 static const int IR_TOTAL_SAMPLES = IR_SAMPLES_PER_PERIOD * IR_NUM_PERIODS; // 40 samples
 
-
 // -------- Servo scan params --------
 static const int SERVO_MIN_DEG = 0;
 static const int SERVO_MAX_DEG = 180;
 static const int SERVO_FWD_DEG = 90;
-
-
 
 // Coarse scan resolution and settle time
 static const int SERVO_STEP_DEG = 6;          // TODO tune
@@ -209,8 +205,6 @@ static void motorsTank(int16_t leftCmd, int16_t rightCmd) {
 
 
 
-
-
 static void safeMotorsTank(int16_t left, int16_t right) {
   if (TEST_ENABLE_MOTORS) motorsTank(left, right);
   else motorsStop();
@@ -221,16 +215,7 @@ static void safeMotorsStop() {
 }
 
 
-// ========================= Timers ============================
-struct SimpleTimer {
-  uint32_t t0 = 0;
-  uint32_t dur = 0;
-  bool running = false;
 
-  void start(uint32_t durationMs) { t0 = millis(); dur = durationMs; running = true; }
-  void stop() { running = false; }
-  bool expired() const { return running && (uint32_t)(millis() - t0) >= dur; }
-};
 
 // ========================== Tape =============================
 
@@ -560,6 +545,8 @@ static void handleInitOrient() {
       break;
   }
 }
+
+
 
 
 
@@ -1016,6 +1003,9 @@ static bool sTurnStarted = false;
 
 static void stageTurnTimed(float deg) {
   if (stageDone) { stageIdleBlink(); return; }
+  Serial.println("Inside Stage Turn Timed subroutine -- trying to turn \n");
+  Serial.println(sTurnStarted);
+
 
   if (!sTurnStarted) {
     sTurnStarted = true;
