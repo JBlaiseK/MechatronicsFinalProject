@@ -1,8 +1,4 @@
 #include <Arduino.h>
-#include <SoftwareSerial.h>
-#include "ProtoLink.h"
-#include <Servo.h>
-
 
 // ========================= Timers ============================
 struct SimpleTimer {
@@ -15,89 +11,57 @@ struct SimpleTimer {
   bool expired() const { return running && (uint32_t)(millis() - t0) >= dur; }
 };
 
+// ===================== STAGE SELECT HERE =====================
 
-
-// ===================== STAGE SELECT HERE ====================
-
-// CHANGE THIS ONE LINE:
-static const uint8_t STAGE_MODE = 2;     // 0 = FULL_FSM, 1..15 = tests (see list below)
+// 0 = FULL_FSM
+// 1 = TAPE_MONITOR_RAW
+// 2 = ULTRASONIC_MONITOR
+// 3 = EXIT_BOX_UNTIL_CROSS
+// 4 = LINE_FOLLOW_UNTIL_HOG
+// 5 = TURN_90_TIMED
+// 6 = TURN_180_TIMED
+// 7 = MOTORS_CONSTANT_FORWARD
+// 8 = MOTORS_TOGGLE_DIRECTION_DEMO
+// 9 = SWIVEL_MOTOR_TEST
+// 10 = SWIVEL_FIRE_ONCE
+// 11 = DRIVE_UNTIL_US_NEAR
+static const uint8_t STAGE_MODE = 1;
 
 // Safety gate: robot will not move unless true.
 static const bool TEST_ENABLE_MOTORS = false;
 
-/*
-  STAGE MODES:
-    0  = FULL_FSM
-    1  = TAPE_MONITOR_RAW
-    2  = ULTRASONIC_MONITOR
-    3  = IR_AMPLITUDE_MONITOR_909HZ      (no servo sweep)
-    4  = SERVO_SWEEP_ONLY               (servo moves, no IR)
-    5  = IR_SCAN_NO_TURN                (scan + print peaks, no wheel turn)
-    6  = IR_ORIENT_ONLY                 (scan + wheel turn)
-    7  = EXIT_BOX_UNTIL_CROSS
-    8  = LINE_FOLLOW_UNTIL_HOG
-
-
-    9  = TURN_90_TIMED
-    10 = TURN_180_TIMED
-    11 = MOTORS_CONSTANT_FORWARD
-
-
-    12 = MOTORS_TOGGLE_DIRECTION_DEMO
-    13 = SHOOTER_LINK_MONITOR
-    14 = SHOOTER_FIRE_ONCE
-    15 = DRIVE_INTO_BOX_UNTIL_US_NEAR   (straight drive + ultrasonic stop)
-*/
-
-
 // ========================= Pin Map ===========================
-  // IR sensor analog input (amplitude after op-amp)
-  // static const uint8_t PIN_IR_AMP = A0;
 
-  // Tape sensors: outer-left, inner-left, inner-right, outer-right
-  static const uint8_t PIN_TAPE_LO = A1;   // left outer
-  static const uint8_t PIN_TAPE_LI = A2;   // left inner
-  static const uint8_t PIN_TAPE_RI = A4;   // right inner
-  static const uint8_t PIN_TAPE_RO = A5;   // right outer
+// Tape sensors: outer-left, inner-left, inner-right, outer-right
+static const uint8_t PIN_TAPE_LO = A1;
+static const uint8_t PIN_TAPE_LI = A2;
+static const uint8_t PIN_TAPE_RI = A4;
+static const uint8_t PIN_TAPE_RO = A5;
 
+// Enable button (active-low)
+static const uint8_t PIN_ENABLE_BTN = 4;
 
-  // Servo that sweeps IR sensor
-  static const uint8_t PIN_IR_SERVO = 2;
-  static Servo irServo;
+// MOTORS
+static const uint8_t PIN_L_ENA = 9;   // PWM
+static const uint8_t PIN_L_IN1 = 8;
+static const uint8_t PIN_L_IN2 = 7;
 
-  // Enable button (active-low)
-  static const uint8_t PIN_ENABLE_BTN = 4;
+static const uint8_t PIN_R_ENA = 10;  // PWM
+static const uint8_t PIN_R_IN1 = 12;
+static const uint8_t PIN_R_IN2 = 11;
 
+// Status LED
+static const uint8_t PIN_STATUS_LED = 13;
 
-  // MOTORS
-  static const uint8_t PIN_L_ENA = 9;  // PWM
-  static const uint8_t PIN_L_IN1 = 8;
-  static const uint8_t PIN_L_IN2 = 7;
+// Ultrasonic (HC-SR04 style)
+static const uint8_t PIN_US_TRIG = 5;
+static const uint8_t PIN_US_ECHO = 6;
 
-  
-  static const uint8_t PIN_R_ENA = 10;  // PWM
-  static const uint8_t PIN_R_IN1 = 12; 
-  static const uint8_t PIN_R_IN2 = 11;
+// Swivel / puck deploy motor
+// ASSUMPTION: simple ON/OFF control through one digital pin
+static const uint8_t PIN_SWIVEL_MOTOR = 3;
 
-
-  // // Status LED
-  static const uint8_t PIN_STATUS_LED = 13;
-
-  // // NAV <-> SHOOTER link (SoftwareSerial)
-  // static const uint8_t PIN_LINK_RX = 10; // NAV receives on D10
-  // static const uint8_t PIN_LINK_TX = 11; // NAV transmits on D11
-
-  // SoftwareSerial link(PIN_LINK_RX, PIN_LINK_TX);
-
-
-  // Ultrasonic (HC-SR04 style)
-  static const uint8_t PIN_US_TRIG = 5;
-  static const uint8_t PIN_US_ECHO = 6;
-
-  // ======================== Constants ==========================
-
-
-
+// ======================== Constants ==========================
 
 // -------- Tape + motion --------
 static const int TAPE_THRESH_LO = 200;
@@ -105,30 +69,25 @@ static const int TAPE_THRESH_LI = 200;
 static const int TAPE_THRESH_RI = 200;
 static const int TAPE_THRESH_RO = 200;
 
-static const int16_t SPEED_FWD    = 255;     // TODO calibrate
-static const int16_t SPEED_TURN   = 255;     // TODO calibrate
+static const int16_t SPEED_FWD    = 255;
+static const int16_t SPEED_TURN   = 255;
+static const int16_t SPEED_SEARCH = 55;
+static const int16_t SPEED_DELTA  = 35;
 
-static const int16_t SPEED_SEARCH = 55;     // recovery turn when tape lost
-static const int16_t SPEED_DELTA  = 35;     // tape-follow steering delta
-
-// Robot turn calibration ONLY (wheel motors)
-static const float MS_PER_DEG_ROBOT = 16.0f; // TODO calibrate using STAGE 9/10
+// Robot turn calibration ONLY
+static const float MS_PER_DEG_ROBOT = 5.0f;
 
 // Tape crossing debounce
 static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 120;
 static const uint32_t HOGLINE_DEBOUNCE_MS    = 120;
 
 // Exit box fallback timeout
-static const uint32_t EXIT_TIMEOUT_MS = 2500;
+static const uint32_t EXIT_TIMEOUT_MS = 3000;
 
-// -------- Shooter config --------
-static const uint8_t  DEFAULT_SHOTS_PER_VOLLEY = 3;
-static const uint16_t DEFAULT_DISTANCE_METRIC  = 0;
+// Swivel motor timing
+static const uint32_t SWIVEL_FIRE_TIME_MS = 2500;
 
-// -------- Reload wait (FULL FSM only) --------
-static const uint32_t RELOAD_WAIT_MS = 12000;
-
-// -------- Ultrasonic --------
+// Ultrasonic
 static const uint32_t US_PING_INTERVAL_MS = 60;
 static const uint32_t US_ECHO_TIMEOUT_US  = 25000;
 static const float    US_CM_PER_US        = 0.0343f / 2.0f;
@@ -139,36 +98,9 @@ static const float    US_CLEAR_WALL_CM = 25.0f;
 static const uint8_t  US_NEAR_N        = 3;
 static const uint8_t  US_CLEAR_N       = 3;
 
-// -------- IR 909Hz sampling (your method) --------
-static const int IR_FREQ = 909;
-static const unsigned long IR_PERIOD_US = 1000000UL / IR_FREQ; // ~1100 us
-static const int IR_SAMPLES_PER_PERIOD = 8;
-static const unsigned long IR_INTERVAL_US = IR_PERIOD_US / IR_SAMPLES_PER_PERIOD; // ~137 us
-static const int IR_NUM_PERIODS = 5;
-static const int IR_TOTAL_SAMPLES = IR_SAMPLES_PER_PERIOD * IR_NUM_PERIODS; // 40 samples
+// =============== Hardware abstraction ========================
 
-// -------- Servo scan params --------
-static const int SERVO_MIN_DEG = 0;
-static const int SERVO_MAX_DEG = 180;
-static const int SERVO_FWD_DEG = 90;
-
-// Coarse scan resolution and settle time
-static const int SERVO_STEP_DEG = 6;          // TODO tune
-static const uint32_t SERVO_SETTLE_MS = 20;   // TODO tune
-
-static const int SCAN_POINTS = (SERVO_MAX_DEG - SERVO_MIN_DEG) / SERVO_STEP_DEG + 1;
-static int irAmp[SCAN_POINTS];
-static int irAngle[SCAN_POINTS];
-static int scanIdx = 0;
-
-
-// Keep peaks separated
-static const int MIN_PEAK_SEPARATION_DEG = 25; // TODO tune
-
-
-// =============== Hardware abstraction (TODO) =================
-
-
+static int readAnalogSettled(uint8_t pin);
 
 // ===================== Motor Driver (ENA/IN1/IN2) =====================
 
@@ -179,23 +111,39 @@ static inline uint8_t clampPwm(int16_t x) {
 }
 
 static void setMotorDirection_L(bool forward) {
-  if (forward) { digitalWrite(PIN_L_IN1, HIGH); digitalWrite(PIN_L_IN2, LOW); }
-  else         { digitalWrite(PIN_L_IN1, LOW);  digitalWrite(PIN_L_IN2, HIGH); }
+  if (forward) {
+    digitalWrite(PIN_L_IN1, HIGH);
+    digitalWrite(PIN_L_IN2, LOW);
+  } else {
+    digitalWrite(PIN_L_IN1, LOW);
+    digitalWrite(PIN_L_IN2, HIGH);
+  }
 }
 
 static void setMotorDirection_R(bool forward) {
-  if (forward) { digitalWrite(PIN_R_IN1, HIGH); digitalWrite(PIN_R_IN2, LOW); }
-  else         { digitalWrite(PIN_R_IN1, LOW);  digitalWrite(PIN_R_IN2, HIGH); }
+  if (forward) {
+    digitalWrite(PIN_R_IN1, HIGH);
+    digitalWrite(PIN_R_IN2, LOW);
+  } else {
+    digitalWrite(PIN_R_IN1, LOW);
+    digitalWrite(PIN_R_IN2, HIGH);
+  }
 }
 
 static void motorWrite_L(int16_t cmd) {
-  if (cmd == 0) { analogWrite(PIN_L_ENA, 0); return; }
+  if (cmd == 0) {
+    analogWrite(PIN_L_ENA, 0);
+    return;
+  }
   setMotorDirection_L(cmd > 0);
   analogWrite(PIN_L_ENA, clampPwm(cmd));
 }
 
 static void motorWrite_R(int16_t cmd) {
-  if (cmd == 0) { analogWrite(PIN_R_ENA, 0); return; }
+  if (cmd == 0) {
+    analogWrite(PIN_R_ENA, 0);
+    return;
+  }
   setMotorDirection_R(cmd > 0);
   analogWrite(PIN_R_ENA, clampPwm(cmd));
 }
@@ -210,8 +158,6 @@ static void motorsTank(int16_t leftCmd, int16_t rightCmd) {
   motorWrite_R(rightCmd);
 }
 
-
-
 static void safeMotorsTank(int16_t left, int16_t right) {
   if (TEST_ENABLE_MOTORS) motorsTank(left, right);
   else motorsStop();
@@ -221,17 +167,24 @@ static void safeMotorsStop() {
   motorsStop();
 }
 
+// ===================== Swivel Motor =====================
 
+static void swivelMotorOn() {
+  digitalWrite(PIN_SWIVEL_MOTOR, HIGH);
+}
 
+static void swivelMotorOff() {
+  digitalWrite(PIN_SWIVEL_MOTOR, LOW);
+}
 
 // ========================== Tape =============================
 
 enum TapeBits : uint8_t {
   TAPE_NONE  = 0,
-  TAPE_LO    = 1 << 0,   // left outer
-  TAPE_LI    = 1 << 1,   // left inner
-  TAPE_RI    = 1 << 2,   // right inner
-  TAPE_RO    = 1 << 3    // right outer
+  TAPE_LO    = 1 << 0,
+  TAPE_LI    = 1 << 1,
+  TAPE_RI    = 1 << 2,
+  TAPE_RO    = 1 << 3
 };
 
 static uint8_t readTapeBits() {
@@ -241,16 +194,13 @@ static uint8_t readTapeBits() {
   int ro = readAnalogSettled(PIN_TAPE_RO);
 
   uint8_t bits = TAPE_NONE;
-  if (lo > TAPE_THRESHOLD) bits |= TAPE_LO;
-  if (li > TAPE_THRESHOLD) bits |= TAPE_LI;
-  if (ri > TAPE_THRESHOLD) bits |= TAPE_RI;
-  if (ro > TAPE_THRESHOLD) bits |= TAPE_RO;
+  if (lo > TAPE_THRESH_LO) bits |= TAPE_LO;
+  if (li > TAPE_THRESH_LI) bits |= TAPE_LI;
+  if (ri > TAPE_THRESH_RI) bits |= TAPE_RI;
+  if (ro > TAPE_THRESH_RO) bits |= TAPE_RO;
 
   return bits;
 }
-
-
-
 
 static bool isTapeCrossing(uint8_t bits) {
   bool li = bits & TAPE_LI;
@@ -258,9 +208,6 @@ static bool isTapeCrossing(uint8_t bits) {
   bool lo = bits & TAPE_LO;
   bool ro = bits & TAPE_RO;
 
-  // Strong crossing evidence:
-  // - both inner sensors see tape, OR
-  // - 3 or more sensors see tape
   uint8_t count = 0;
   if (lo) count++;
   if (li) count++;
@@ -269,7 +216,6 @@ static bool isTapeCrossing(uint8_t bits) {
 
   return (li && ri) || (count >= 3);
 }
-
 
 static bool crossingDebounced(SimpleTimer &deb, uint32_t debounceMs) {
   uint8_t bits = readTapeBits();
@@ -282,10 +228,7 @@ static bool crossingDebounced(SimpleTimer &deb, uint32_t debounceMs) {
   }
 }
 
-
-
-// Last seen tape side for recovery when both sensors go off.
-// -1 = last saw LEFT, +1 = last saw RIGHT, 0 = both/unknown
+// -1 = last saw LEFT, +1 = last saw RIGHT, 0 = centered/unknown
 static int8_t lastTapeSide = 0;
 
 static void updateTapeMemory(uint8_t bits) {
@@ -303,9 +246,7 @@ static void updateTapeMemory(uint8_t bits) {
   else lastTapeSide = 0;
 }
 
-
-
-// Line follow: if none, recovery turn toward lastTapeSide.
+// Finds line and then sticks to it
 static void lineFollowStep() {
   uint8_t bits = readTapeBits();
   updateTapeMemory(bits);
@@ -315,55 +256,51 @@ static void lineFollowStep() {
   bool ri = bits & TAPE_RI;
   bool ro = bits & TAPE_RO;
 
-  // 1) centered / good lock
+  // centered / ideal
   if (li && ri && !lo && !ro) {
     safeMotorsTank(SPEED_FWD, SPEED_FWD);
     return;
   }
 
-  // 2) strong crossing / broad tape region
+  // strong crossing / broad tape
   if (isTapeCrossing(bits)) {
     safeMotorsTank(SPEED_FWD, SPEED_FWD);
     return;
   }
 
-  // 3) slight left drift:
-  // line is more under left-inner than right-inner,
-  // so steer left a bit
+  // slight left
   if (li && !ri && !lo) {
     safeMotorsTank(SPEED_FWD - SPEED_DELTA, SPEED_FWD + SPEED_DELTA);
     return;
   }
 
-  // 4) slight right drift
+  // slight right
   if (ri && !li && !ro) {
     safeMotorsTank(SPEED_FWD + SPEED_DELTA, SPEED_FWD - SPEED_DELTA);
     return;
   }
 
-  // 5) strong left deviation: outer-left sees line
+  // strong left
   if (lo) {
     safeMotorsTank(SPEED_FWD - 2 * SPEED_DELTA, SPEED_FWD + 2 * SPEED_DELTA);
     return;
   }
 
-  // 6) strong right deviation: outer-right sees line
+  // strong right
   if (ro) {
     safeMotorsTank(SPEED_FWD + 2 * SPEED_DELTA, SPEED_FWD - 2 * SPEED_DELTA);
     return;
   }
 
-  // 7) lost tape completely -> recovery using memory
+  // lost tape completely -> recovery
   if (lastTapeSide < 0) {
     safeMotorsTank(-SPEED_SEARCH, SPEED_SEARCH);
   } else if (lastTapeSide > 0) {
     safeMotorsTank(SPEED_SEARCH, -SPEED_SEARCH);
   } else {
-    // no clue where tape went, creep forward
     safeMotorsTank(SPEED_SEARCH, SPEED_SEARCH);
   }
 }
-
 
 // ======================== Ultrasonic =========================
 
@@ -401,7 +338,6 @@ static void ultrasonicUpdate() {
 
   usValid = true;
 
-  // smooth a bit
   if (usDistanceCm <= 0.0f) usDistanceCm = cm;
   else usDistanceCm = 0.6f * usDistanceCm + 0.4f * cm;
 
@@ -420,7 +356,7 @@ static void ultrasonicUpdate() {
   if (usClearCount >= US_CLEAR_N) usNearWall = false;
 }
 
-static bool TestUsNearWall() {
+static bool testUsNearWall() {
   if (!usValid) return false;
   return usNearWall;
 }
@@ -434,218 +370,17 @@ static void ultrasonicReset() {
   usNearWall = false;
 }
 
-// ============================================================
-// =================== Shooter Link Helpers ====================
-static bool shooterBusy = false;
-static uint16_t cmdSeq = 1;
-static uint8_t shotsLeftTotal = 8; // TODO set initial count
-static uint8_t lastVolleyFired = 0;
-
-static char rxLine[Proto::LINE_MAX];
-
-// static void pollShooterLink() {
-//   // Drain all available lines each loop
-//   while (Proto::readLine(link, rxLine, sizeof(rxLine))) {
-//     Proto::AckMsg ack;
-//     Proto::DoneMsg done;
-
-//     if (Proto::parseAck(rxLine, ack)) {
-//       Serial.print("[NAV] shooter ACK seq="); Serial.println(ack.seq);
-//       continue;
-//     }
-
-//     if (Proto::parseDone(rxLine, done)) {
-//       Serial.print("[NAV] shooter DONE seq="); Serial.print(done.seq);
-//       Serial.print(" fired="); Serial.println(done.fired);
-
-//       shooterBusy = false;
-//       lastVolleyFired = done.fired;
-
-//       if (shotsLeftTotal >= done.fired) shotsLeftTotal -= done.fired;
-//       else shotsLeftTotal = 0;
-
-//       continue;
-//     }
-
-//     Serial.print("[NAV] ??? "); Serial.println(rxLine);
-//   }
-// }
-
-static void sendFireOnce(uint8_t shots, uint16_t dist) {
-  // Proto::sendFire(link, cmdSeq, shots, dist);
-  Serial.print("[NAV] sent FIRE seq="); Serial.print(cmdSeq);
-  Serial.print(" shots="); Serial.print(shots);
-  Serial.print(" dist="); Serial.println(dist);
-
-  shooterBusy = true;
-  cmdSeq++;
-}
-
-
-// ======================= IR Orientation ======================
-typedef enum {
-  ORIENT_IDLE,
-  ORIENT_SCAN_SETTLE,
-  ORIENT_SCAN_SAMPLE,
-  ORIENT_COMPUTE,
-  ORIENT_TURN
-} OrientPhase;
-
-static OrientPhase orientPhase = ORIENT_IDLE;
-
-static SimpleTimer servoSettleTimer;
-static SimpleTimer orientTurnTimer;
-
-static int peak1Angle = SERVO_FWD_DEG;
-static int peak2Angle = SERVO_FWD_DEG;
-static int bisectorAngle = SERVO_FWD_DEG;
-static int orientErrorDeg = 0;
-
-// 909 Hz amplitude window
-static int readIrAmplitude909Hz() {
-  int min_val = 1023;
-  int max_val = 0;
-
-  unsigned long last_sample_time = micros();
-
-  for (int i = 0; i < IR_TOTAL_SAMPLES; ) {
-    if (micros() - last_sample_time >= IR_INTERVAL_US) {
-      last_sample_time += IR_INTERVAL_US;
-
-      int val = analogRead(PIN_IR_AMP);
-      if (val < min_val) min_val = val;
-      if (val > max_val) max_val = val;
-      i++;
-    }
-  }
-  return (max_val - min_val);
-}
-
-static void computeTwoPeaksAndBisector(int &p1Idx, int &p2Idx, int &bisDeg) {
-  p1Idx = 0;
-  for (int i = 1; i < SCAN_POINTS; i++) {
-    if (irAmp[i] > irAmp[p1Idx]) p1Idx = i;
-  }
-
-  p2Idx = -1;
-  for (int i = 0; i < SCAN_POINTS; i++) {
-    int sep = abs(irAngle[i] - irAngle[p1Idx]);
-    if (sep < MIN_PEAK_SEPARATION_DEG) continue;
-
-    if (p2Idx < 0 || irAmp[i] > irAmp[p2Idx]) p2Idx = i;
-  }
-
-  if (p2Idx < 0) {
-    bisDeg = irAngle[p1Idx];
-    return;
-  }
-
-  bisDeg = (irAngle[p1Idx] + irAngle[p2Idx]) / 2;
-}
-
-static void initOrientStart() {
-  scanIdx = 0;
-  for (int i = 0; i < SCAN_POINTS; i++) {
-    irAmp[i] = 0;
-    irAngle[i] = SERVO_MIN_DEG + i * SERVO_STEP_DEG;
-  }
-
-  irServo.write(SERVO_MIN_DEG);
-  servoSettleTimer.start(SERVO_SETTLE_MS);
-  orientPhase = ORIENT_SCAN_SETTLE;
-}
-
-static void handleInitOrient() {
-  switch (orientPhase) {
-
-    case ORIENT_SCAN_SETTLE:
-      if (servoSettleTimer.expired()) orientPhase = ORIENT_SCAN_SAMPLE;
-      break;
-
-    case ORIENT_SCAN_SAMPLE: {
-      int amp = readIrAmplitude909Hz();
-      irAmp[scanIdx] = amp;
-
-      scanIdx++;
-      if (scanIdx >= SCAN_POINTS) {
-        orientPhase = ORIENT_COMPUTE;
-      } else {
-        int nextAng = irAngle[scanIdx];
-        irServo.write(nextAng);
-        servoSettleTimer.start(SERVO_SETTLE_MS);
-        orientPhase = ORIENT_SCAN_SETTLE;
-      }
-    } break;
-
-    case ORIENT_COMPUTE: {
-      int p1Idx, p2Idx, bisDeg;
-      computeTwoPeaksAndBisector(p1Idx, p2Idx, bisDeg);
-
-      peak1Angle = irAngle[p1Idx];
-      peak2Angle = (p2Idx < 0) ? peak1Angle : irAngle[p2Idx];
-      bisectorAngle = bisDeg;
-
-      orientErrorDeg = bisectorAngle - SERVO_FWD_DEG;
-
-      uint32_t turnMs = (uint32_t)(abs(orientErrorDeg) * MS_PER_DEG_ROBOT);
-
-      if (turnMs < 30) {
-        safeMotorsStop();
-        orientPhase = ORIENT_IDLE;
-        return;
-      }
-
-      // NOTE: verify this is right/left for your wiring
-      if (orientErrorDeg > 0) safeMotorsTank(SPEED_TURN, -SPEED_TURN);
-      else                    safeMotorsTank(-SPEED_TURN, SPEED_TURN);
-
-      orientTurnTimer.start(turnMs);
-      orientPhase = ORIENT_TURN;
-
-      Serial.print("[ORIENT] p1="); Serial.print(peak1Angle);
-      Serial.print(" p2="); Serial.print(peak2Angle);
-      Serial.print(" bis="); Serial.print(bisectorAngle);
-      Serial.print(" err="); Serial.print(orientErrorDeg);
-      Serial.print(" ms="); Serial.println(turnMs);
-    } break;
-
-    case ORIENT_TURN:
-      if (orientTurnTimer.expired()) {
-        safeMotorsStop();
-        orientPhase = ORIENT_IDLE;
-      }
-      break;
-
-    case ORIENT_IDLE:
-    default:
-      break;
-  }
-}
-
-
-
-
-
-
-
-
-
 // ========================== FULL FSM =========================
+
 typedef enum {
   F_IDLE_WAIT_ENABLE,
-  F_INIT_ORIENT,
+  F_WAIT_FOR_WALL_AT_START,
+  F_TURN_90_TO_EXIT,
   F_EXIT_BOX_UNTIL_CROSS,
   F_LINE_FOLLOW_TO_HOG,
-  F_AT_HOG_SEND_FIRE,
-  F_WAIT_SHOOTER_DONE,
-
-  // return sequence (your updated requirement)
+  F_FIRE_SWIVEL,
   F_TURN_180_AFTER_FIRE,
-  F_TURN_RIGHT_INTO_BOX,
-  F_DRIVE_INTO_BOX_US,
-
-  F_RELOAD_WAIT,
-  F_REORIENT_180,
+  F_DRIVE_TO_WALL,
   F_DONE
 } FullState;
 
@@ -655,7 +390,7 @@ static SimpleTimer fExitDeb;
 static SimpleTimer fExitTimeout;
 static SimpleTimer fHogDeb;
 static SimpleTimer fTurnTimer;
-static SimpleTimer fReloadTimer;
+static SimpleTimer fFireTimer;
 
 static bool prevBtn = false;
 
@@ -673,45 +408,63 @@ static void fullFsmResetRun() {
   fExitTimeout.stop();
   fHogDeb.stop();
   fTurnTimer.stop();
-  fReloadTimer.stop();
+  fFireTimer.stop();
 
   ultrasonicReset();
   lastTapeSide = 0;
 
-  shooterBusy = false;
-  orientPhase = ORIENT_IDLE;
-
+  swivelMotorOff();
   safeMotorsStop();
 }
 
 static void startTimedTurnRight(float deg) {
   uint32_t ms = (uint32_t)(deg * MS_PER_DEG_ROBOT);
-  // NOTE: verify that this actually turns RIGHT for your wiring.
-  safeMotorsTank(SPEED_TURN, -SPEED_TURN);
+  safeMotorsTank(SPEED_TURN, -SPEED_TURN);   // verify this is actually RIGHT for your wiring
   fTurnTimer.start(ms);
 }
 
 static void fullFsmLoop() {
-  // pollShooterLink();
+  ultrasonicUpdate();
 
   switch (fullState) {
-
     case F_IDLE_WAIT_ENABLE:
       safeMotorsStop();
+      swivelMotorOff();
+
       if (readEnableButtonPressedEdge()) {
-        Serial.println("[FULL] enable -> INIT_ORIENT");
-        initOrientStart();
-        fullState = F_INIT_ORIENT;
+        Serial.println("[FULL] enable -> WAIT_FOR_WALL_AT_START");
+        ultrasonicReset();
+        fullState = F_WAIT_FOR_WALL_AT_START;
       }
       break;
 
-    case F_INIT_ORIENT:
-      handleInitOrient();
-      if (orientPhase == ORIENT_IDLE) {
-        Serial.println("[FULL] orient done -> EXIT_BOX_UNTIL_CROSS");
+    case F_WAIT_FOR_WALL_AT_START:
+      safeMotorsStop();
+
+      // wait until we have at least one real ultrasonic reading
+      if (!usValid) {
+        break;
+      }
+
+      // keep turning 90 until front is no longer blocked
+      if (testUsNearWall()) {
+        Serial.println("[FULL] wall detected -> TURN_90_TO_EXIT");
+        startTimedTurnRight(90.0f);
+        fullState = F_TURN_90_TO_EXIT;
+      } else {
+        Serial.println("[FULL] no wall ahead -> EXIT_BOX_UNTIL_CROSS");
         fExitDeb.stop();
         fExitTimeout.start(EXIT_TIMEOUT_MS);
         fullState = F_EXIT_BOX_UNTIL_CROSS;
+      }
+      break;
+
+    case F_TURN_90_TO_EXIT:
+      if (fTurnTimer.expired()) {
+        safeMotorsStop();
+        ultrasonicReset();
+        Serial.println("[FULL] 90 done -> recheck wall");
+        fullState = F_WAIT_FOR_WALL_AT_START;
       }
       break;
 
@@ -737,33 +490,23 @@ static void fullFsmLoop() {
 
     case F_LINE_FOLLOW_TO_HOG:
       lineFollowStep();
+
       if (crossingDebounced(fHogDeb, HOGLINE_DEBOUNCE_MS)) {
-        Serial.println("[FULL] hogline crossing -> AT_HOG_SEND_FIRE");
         safeMotorsStop();
-        fullState = F_AT_HOG_SEND_FIRE;
+        swivelMotorOn();
+        fFireTimer.start(SWIVEL_FIRE_TIME_MS);
+        Serial.println("[FULL] hogline crossing -> FIRE_SWIVEL");
+        fullState = F_FIRE_SWIVEL;
       }
       break;
 
-    case F_AT_HOG_SEND_FIRE: {
+    case F_FIRE_SWIVEL:
       safeMotorsStop();
 
-      if (shotsLeftTotal == 0) {
-        Serial.println("[FULL] no shots left -> DONE");
-        fullState = F_DONE;
-        break;
-      }
-
-      uint8_t volley = min((uint8_t)DEFAULT_SHOTS_PER_VOLLEY, shotsLeftTotal);
-      sendFireOnce(volley, DEFAULT_DISTANCE_METRIC);
-      fullState = F_WAIT_SHOOTER_DONE;
-    } break;
-
-    case F_WAIT_SHOOTER_DONE:
-      safeMotorsStop();
-      if (!shooterBusy) {
-        Serial.println("[FULL] shooter done -> TURN_180_AFTER_FIRE");
-        startTimedTurnRight(180.0f);          // timed 180 using "right turn" helper (direction depends on your wiring)
-        ultrasonicReset();                   // ultrasonic only used on box-entry drive
+      if (fFireTimer.expired()) {
+        swivelMotorOff();
+        Serial.println("[FULL] fire done -> TURN_180_AFTER_FIRE");
+        startTimedTurnRight(180.0f);
         fullState = F_TURN_180_AFTER_FIRE;
       }
       break;
@@ -771,63 +514,27 @@ static void fullFsmLoop() {
     case F_TURN_180_AFTER_FIRE:
       if (fTurnTimer.expired()) {
         safeMotorsStop();
-        Serial.println("[FULL] 180 done -> TURN_RIGHT_INTO_BOX");
-        startTimedTurnRight(90.0f);           // turn right into the box
-        fullState = F_TURN_RIGHT_INTO_BOX;
-      }
-      break;
-
-    case F_TURN_RIGHT_INTO_BOX:
-      if (fTurnTimer.expired()) {
-        safeMotorsStop();
-        Serial.println("[FULL] right turn done -> DRIVE_INTO_BOX_US");
         ultrasonicReset();
-        fullState = F_DRIVE_INTO_BOX_US;
+        Serial.println("[FULL] 180 done -> DRIVE_TO_WALL");
+        fullState = F_DRIVE_TO_WALL;
       }
       break;
 
-    case F_DRIVE_INTO_BOX_US:
-      ultrasonicUpdate();
-
-      // drive straight into the box
+    case F_DRIVE_TO_WALL:
       safeMotorsTank(SPEED_FWD, SPEED_FWD);
 
-      if (TestUsNearWall()) {
-        Serial.println("[FULL] near wall -> RELOAD_WAIT");
+      if (testUsNearWall()) {
         safeMotorsStop();
-        fReloadTimer.start(RELOAD_WAIT_MS);
-        fullState = F_RELOAD_WAIT;
-      }
-      break;
-
-    case F_RELOAD_WAIT:
-      safeMotorsStop();
-      if (fReloadTimer.expired()) {
-        Serial.println("[FULL] reload done -> REORIENT_180");
-        startTimedTurnRight(180.0f);          // face out again
-        fullState = F_REORIENT_180;
-      }
-      break;
-
-    case F_REORIENT_180:
-      if (fTurnTimer.expired()) {
-        safeMotorsStop();
-
-        if (shotsLeftTotal == 0) {
-          Serial.println("[FULL] shots exhausted -> DONE");
-          fullState = F_DONE;
-        } else {
-          Serial.println("[FULL] next loop -> INIT_ORIENT");
-          initOrientStart();
-          fullState = F_INIT_ORIENT;
-        }
+        Serial.println("[FULL] wall reached -> DONE");
+        fullState = F_DONE;
       }
       break;
 
     case F_DONE:
     default:
       safeMotorsStop();
-      // slow blink to indicate DONE
+      swivelMotorOff();
+
       static uint32_t last = 0;
       static bool on = false;
       if (millis() - last > 600) {
@@ -839,39 +546,8 @@ static void fullFsmLoop() {
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
 // ============================================================
 // ===================== Stage/Test Runner =====================
-
-/*
-  STAGE MODES:
-    0  = FULL_FSM
-    1  = TAPE_MONITOR_RAW
-    2  = ULTRASONIC_MONITOR
-    3  = IR_AMPLITUDE_MONITOR_909HZ      (no servo sweep)
-    4  = SERVO_SWEEP_ONLY               (servo moves, no IR)
-    5  = IR_SCAN_NO_TURN                (scan + print peaks, no wheel turn)
-    6  = IR_ORIENT_ONLY                 (scan + wheel turn)
-    7  = EXIT_BOX_UNTIL_CROSS
-    8  = LINE_FOLLOW_UNTIL_HOG
-    9  = TURN_90_TIMED
-    10 = TURN_180_TIMED
-    11 = MOTORS_CONSTANT_FORWARD
-    12 = MOTORS_TOGGLE_DIRECTION_DEMO
-    13 = SHOOTER_LINK_MONITOR
-    14 = SHOOTER_FIRE_ONCE
-    15 = DRIVE_INTO_BOX_UNTIL_US_NEAR   (straight drive + ultrasonic stop)
-*/
 
 static bool stageDone = false;
 
@@ -879,6 +555,7 @@ static void markStageDone(const char *msg) {
   if (stageDone) return;
   stageDone = true;
   safeMotorsStop();
+  swivelMotorOff();
   Serial.print("[STAGE DONE] ");
   Serial.println(msg);
 }
@@ -898,19 +575,15 @@ static const char* stageName(uint8_t s) {
     case 0:  return "FULL_FSM";
     case 1:  return "TAPE_MONITOR_RAW";
     case 2:  return "ULTRASONIC_MONITOR";
-    case 3:  return "IR_AMPLITUDE_MONITOR_909HZ";
-    case 4:  return "SERVO_SWEEP_ONLY";
-    case 5:  return "IR_SCAN_NO_TURN";
-    case 6:  return "IR_ORIENT_ONLY";
-    case 7:  return "EXIT_BOX_UNTIL_CROSS";
-    case 8:  return "LINE_FOLLOW_UNTIL_HOG";
-    case 9:  return "TURN_90_TIMED";
-    case 10: return "TURN_180_TIMED";
-    case 11: return "MOTORS_CONSTANT_FORWARD";
-    case 12: return "MOTORS_TOGGLE_DIRECTION_DEMO";
-    case 13: return "SHOOTER_LINK_MONITOR";
-    case 14: return "SHOOTER_FIRE_ONCE";
-    case 15: return "DRIVE_INTO_BOX_UNTIL_US_NEAR";
+    case 3:  return "EXIT_BOX_UNTIL_CROSS";
+    case 4:  return "LINE_FOLLOW_UNTIL_HOG";
+    case 5:  return "TURN_90_TIMED";
+    case 6:  return "TURN_180_TIMED";
+    case 7:  return "MOTORS_CONSTANT_FORWARD";
+    case 8:  return "MOTORS_TOGGLE_DIRECTION_DEMO";
+    case 9:  return "SWIVEL_MOTOR_TEST";
+    case 10: return "SWIVEL_FIRE_ONCE";
+    case 11: return "DRIVE_UNTIL_US_NEAR";
     default: return "UNKNOWN";
   }
 }
@@ -918,6 +591,7 @@ static const char* stageName(uint8_t s) {
 // ---- Stage 1: tape monitor ----
 static void stageTapeMonitorRaw() {
   safeMotorsStop();
+  swivelMotorOff();
 
   static uint32_t last = 0;
   if (millis() - last < 120) return;
@@ -945,6 +619,7 @@ static void stageTapeMonitorRaw() {
 // ---- Stage 2: ultrasonic monitor ----
 static void stageUltrasonicMonitor() {
   safeMotorsStop();
+  swivelMotorOff();
   ultrasonicUpdate();
 
   static uint32_t last = 0;
@@ -956,83 +631,7 @@ static void stageUltrasonicMonitor() {
   Serial.print(" near="); Serial.println(usNearWall ? "Y" : "N");
 }
 
-// ---- Stage 3: IR amplitude monitor (no servo sweep) ----
-static void stageIrAmplitudeMonitor() {
-  safeMotorsStop();
-
-  static uint32_t last = 0;
-  if (millis() - last < 80) return;
-  last = millis();
-
-  int amp = readIrAmplitude909Hz();
-  Serial.print("[IR] amp="); Serial.println(amp);
-}
-
-// ---- Stage 4: servo sweep only ----
-static void stageServoSweepOnly() {
-  safeMotorsStop();
-
-  static int pos = SERVO_MIN_DEG;
-  static int dir = +1;
-  static uint32_t last = 0;
-
-  if (millis() - last < 20) return;
-  last = millis();
-
-  irServo.write(pos);
-  pos += dir;
-
-  if (pos >= SERVO_MAX_DEG) { pos = SERVO_MAX_DEG; dir = -1; }
-  if (pos <= SERVO_MIN_DEG) { pos = SERVO_MIN_DEG; dir = +1; }
-}
-
-// ---- Stage 5: IR scan, compute peaks, print, no wheel turn ----
-static void stageIrScanNoTurn() {
-  if (stageDone) { stageIdleBlink(); return; }
-
-  static bool started = false;
-  if (!started) {
-    started = true;
-    Serial.println("[STAGE] IR scan (no wheel turn)");
-    initOrientStart();
-  }
-
-  // If it enters ORIENT_TURN for any reason, stop it
-  if (orientPhase == ORIENT_TURN) {
-    safeMotorsStop();
-    orientPhase = ORIENT_IDLE;
-  } else {
-    handleInitOrient();
-  }
-
-  if (orientPhase == ORIENT_IDLE) {
-    Serial.print("[IR] peak1="); Serial.print(peak1Angle);
-    Serial.print(" peak2="); Serial.print(peak2Angle);
-    Serial.print(" bis="); Serial.print(bisectorAngle);
-    Serial.print(" err="); Serial.println(orientErrorDeg);
-    markStageDone("IR scan complete (no turn).");
-  }
-}
-
-// ---- Stage 6: IR orient only ----
-static void stageIrOrientOnly() {
-  if (stageDone) { stageIdleBlink(); return; }
-
-  static bool started = false;
-  if (!started) {
-    started = true;
-    Serial.println("[STAGE] IR orient only (scan + wheel turn)");
-    initOrientStart();
-  }
-
-  handleInitOrient();
-
-  if (orientPhase == ORIENT_IDLE) {
-    markStageDone("IR orient complete.");
-  }
-}
-
-// ---- Stage 7: exit box until crossing ----
+// ---- Stage 3: exit box until crossing ----
 static SimpleTimer sExitDeb;
 static SimpleTimer sExitTimeout;
 
@@ -1060,7 +659,7 @@ static void stageExitUntilCross() {
   }
 }
 
-// ---- Stage 8: line follow until hogline ----
+// ---- Stage 4: line follow until hogline ----
 static SimpleTimer sHogDeb;
 
 static void stageFollowUntilHog() {
@@ -1081,15 +680,12 @@ static void stageFollowUntilHog() {
   }
 }
 
-// ---- Stage 9/10: timed turns ----
+// ---- Stage 5/6: timed turns ----
 static SimpleTimer sTurn;
 static bool sTurnStarted = false;
 
 static void stageTurnTimed(float deg) {
   if (stageDone) { stageIdleBlink(); return; }
-  Serial.println("Inside Stage Turn Timed subroutine -- trying to turn \n");
-  Serial.println(sTurnStarted);
-
 
   if (!sTurnStarted) {
     sTurnStarted = true;
@@ -1101,20 +697,20 @@ static void stageTurnTimed(float deg) {
     Serial.print(" ms=");
     Serial.println(ms);
 
-    // Default "right turn" assumption; verify for your wiring
-    safeMotorsTank(-SPEED_TURN, SPEED_TURN);
+    safeMotorsTank(SPEED_TURN, -SPEED_TURN);   // keep consistent with startTimedTurnRight()
     sTurn.start(ms);
   }
 
   if (sTurn.expired()) {
-    
     safeMotorsStop();
     markStageDone("Timed turn complete.");
   }
 }
 
-// ---- Stage 11: motors constant forward ----
+// ---- Stage 7: motors constant forward ----
 static void stageMotorsConstantForward() {
+  swivelMotorOff();
+
   if (!TEST_ENABLE_MOTORS) {
     safeMotorsStop();
     static uint32_t last = 0;
@@ -1135,7 +731,7 @@ static void stageMotorsConstantForward() {
   }
 }
 
-// ---- Stage 12: motor direction toggle demo ----
+// ---- Stage 8: motor direction toggle demo ----
 enum DirState { RUNNING, WAITING };
 static DirState dirState = WAITING;
 static bool isForward = true;
@@ -1151,12 +747,14 @@ static bool buttonEdgeForToggle() {
 }
 
 static void stageMotorToggleDemo() {
+  swivelMotorOff();
+
   if (!TEST_ENABLE_MOTORS) {
     safeMotorsStop();
     static uint32_t last = 0;
     if (millis() - last > 500) {
       last = millis();
-      Serial.println("[STAGE12] motors disabled (TEST_ENABLE_MOTORS=false).");
+      Serial.println("[STAGE8] motors disabled (TEST_ENABLE_MOTORS=false).");
     }
     return;
   }
@@ -1165,10 +763,10 @@ static void stageMotorToggleDemo() {
     if (dirState == WAITING) {
       dirState = RUNNING;
       lastToggleMs = millis();
-      Serial.println("[STAGE12] RUNNING");
+      Serial.println("[STAGE8] RUNNING");
     } else {
       dirState = WAITING;
-      Serial.println("[STAGE12] WAITING");
+      Serial.println("[STAGE8] WAITING");
     }
   }
 
@@ -1180,7 +778,7 @@ static void stageMotorToggleDemo() {
   if (millis() - lastToggleMs >= TIME_DELAY_MS) {
     lastToggleMs += TIME_DELAY_MS;
     isForward = !isForward;
-    Serial.print("[STAGE12] Toggled -> ");
+    Serial.print("[STAGE8] Toggled -> ");
     Serial.println(isForward ? "forward" : "backward");
   }
 
@@ -1188,70 +786,70 @@ static void stageMotorToggleDemo() {
   else           safeMotorsTank(-SPEED_FWD, -SPEED_FWD);
 }
 
-// ---- Stage 13: shooter link monitor ----
-static void stageShooterLinkMonitor() {
+// ---- Stage 9: swivel motor monitor ----
+static void stageSwivelMotorTest() {
   safeMotorsStop();
-  // pollShooterLink();
 
+  static bool on = false;
   static uint32_t last = 0;
-  if (millis() - last > 500) {
+
+  if (millis() - last > 1000) {
     last = millis();
-    Serial.println("[STAGE13] Listening for ACK/DONE...");
-  }
-}
+    on = !on;
 
-// ---- Stage 14: shooter fire once ----
-static void stageShooterFireOnce() {
-  if (stageDone) { stageIdleBlink(); return; }
-
-  static bool started = false;
-  static bool sent = false;
-
-  if (!started) {
-    started = true;
-    sent = false;
-    Serial.println("[STAGE14] Send FIRE once, wait DONE.");
-    safeMotorsStop();
-  }
-
-  // pollShooterLink();
-
-  if (!sent) {
-    if (shotsLeftTotal == 0) {
-      markStageDone("No shots left to fire.");
-      return;
+    if (on) {
+      swivelMotorOn();
+      Serial.println("[STAGE9] swivel ON");
+    } else {
+      swivelMotorOff();
+      Serial.println("[STAGE9] swivel OFF");
     }
-    uint8_t volley = min((uint8_t)DEFAULT_SHOTS_PER_VOLLEY, shotsLeftTotal);
-    sendFireOnce(volley, DEFAULT_DISTANCE_METRIC);
-    sent = true;
-  }
-
-  if (sent && !shooterBusy) {
-    markStageDone("Shooter DONE received.");
   }
 }
 
-// ---- Stage 15: drive into box until ultrasonic near wall ----
-static void stageDriveIntoBoxUntilUsNear() {
+// ---- Stage 10: swivel fire once ----
+static void stageSwivelFireOnce() {
+  if (stageDone) { stageIdleBlink(); return; }
+
+  static bool started = false;
+  static SimpleTimer fireOnceTimer;
+
+  if (!started) {
+    started = true;
+    Serial.println("[STAGE10] swivel fire once.");
+    swivelMotorOn();
+    fireOnceTimer.start(SWIVEL_FIRE_TIME_MS);
+  }
+
+  safeMotorsStop();
+
+  if (fireOnceTimer.expired()) {
+    swivelMotorOff();
+    markStageDone("Swivel fire complete.");
+  }
+}
+
+// ---- Stage 11: drive until ultrasonic near wall ----
+static void stageDriveUntilUsNear() {
   if (stageDone) { stageIdleBlink(); return; }
 
   static bool started = false;
   if (!started) {
     started = true;
-    Serial.println("[STAGE15] Drive forward until ultrasonic near wall.");
+    Serial.println("[STAGE11] Drive forward until ultrasonic near wall.");
     ultrasonicReset();
   }
 
   ultrasonicUpdate();
   safeMotorsTank(SPEED_FWD, SPEED_FWD);
 
-  if (TestUsNearWall()) {
+  if (testUsNearWall()) {
     markStageDone("Near wall detected.");
   }
 }
 
-
 // ===================== Arduino setup/loop ====================
+
 void setup() {
   pinMode(PIN_ENABLE_BTN, INPUT_PULLUP);
   pinMode(PIN_STATUS_LED, OUTPUT);
@@ -1261,13 +859,14 @@ void setup() {
   pinMode(PIN_TAPE_RI, INPUT);
   pinMode(PIN_TAPE_RO, INPUT);
 
-  // Ultrasonic pins
   pinMode(PIN_US_TRIG, OUTPUT);
   pinMode(PIN_US_ECHO, INPUT);
   digitalWrite(PIN_US_TRIG, LOW);
 
+  pinMode(PIN_SWIVEL_MOTOR, OUTPUT);
+  swivelMotorOff();
+
   Serial.begin(115200);
-  // link.begin(19200);
 
   Serial.println("[NAV] boot");
 
@@ -1277,18 +876,10 @@ void setup() {
   Serial.print(stageName(STAGE_MODE));
   Serial.println(")");
 
-  Serial.println("[NAV] TEST_ENABLE_MOTORS="); Serial.println(TEST_ENABLE_MOTORS ? "true" : "false");
-
-  // Speed up ADC (your prescaler trick)
-  // bitClear(ADCSRA, ADPS0);
-  // bitSet(ADCSRA, ADPS1);
-  // bitSet(ADCSRA, ADPS2);
+  Serial.print("[NAV] TEST_ENABLE_MOTORS=");
+  Serial.println(TEST_ENABLE_MOTORS ? "true" : "false");
 
   analogReference(DEFAULT);
-
-  // Servo init
-  // irServo.attach(PIN_IR_SERVO);
-  // irServo.write(SERVO_FWD_DEG);
 
   pinMode(PIN_L_ENA, OUTPUT);
   pinMode(PIN_L_IN1, OUTPUT);
@@ -1304,41 +895,31 @@ void setup() {
   ultrasonicReset();
   lastTapeSide = 0;
 
-  // reset stage-specific state
   sExitDeb.stop();
   sExitTimeout.stop();
   sHogDeb.stop();
   sTurn.stop();
   sTurnStarted = false;
 
-  // reset shooter bookkeeping
-  shooterBusy = false;
-  cmdSeq = 1;
-
-  // FULL FSM reset
   fullFsmResetRun();
 
-  Serial.println("SERVO pin="); Serial.println(PIN_IR_SERVO);
-  Serial.println("L_ENA="); Serial.println(PIN_L_ENA);
-  Serial.println("L_IN1="); Serial.println(PIN_L_IN1);
-  Serial.println("L_IN2="); Serial.println(PIN_L_IN2);
-  Serial.println("R_ENA="); Serial.println(PIN_R_ENA);
-  Serial.println("R_IN1="); Serial.println(PIN_R_IN1);
-  Serial.println("R_IN2="); Serial.println(PIN_R_IN2);
-  Serial.println("US_TRIG="); Serial.println(PIN_US_TRIG);
-  Serial.println("US_ECHO="); Serial.println(PIN_US_ECHO);
-
+  Serial.print("L_ENA="); Serial.println(PIN_L_ENA);
+  Serial.print("L_IN1="); Serial.println(PIN_L_IN1);
+  Serial.print("L_IN2="); Serial.println(PIN_L_IN2);
+  Serial.print("R_ENA="); Serial.println(PIN_R_ENA);
+  Serial.print("R_IN1="); Serial.println(PIN_R_IN1);
+  Serial.print("R_IN2="); Serial.println(PIN_R_IN2);
+  Serial.print("US_TRIG="); Serial.println(PIN_US_TRIG);
+  Serial.print("US_ECHO="); Serial.println(PIN_US_ECHO);
+  Serial.print("SWIVEL_MOTOR="); Serial.println(PIN_SWIVEL_MOTOR);
 
   Serial.println("[NAV] ready");
-
-
-  
 }
 
 static int readAnalogSettled(uint8_t pin) {
-  (void)analogRead(pin);          // throw away (mux settle)
+  (void)analogRead(pin);
   delayMicroseconds(200);
-  (void)analogRead(pin);          // throw away again
+  (void)analogRead(pin);
   delayMicroseconds(200);
   return analogRead(pin);
 }
@@ -1360,25 +941,21 @@ static void stageAnalogPinScan() {
 void loop() {
   switch (STAGE_MODE) {
     case 0:  fullFsmLoop();                 break;
-    // case 1: stageAnalogPinScan(); break;
     case 1:  stageTapeMonitorRaw();         break;
     case 2:  stageUltrasonicMonitor();      break;
-    case 3:  stageIrAmplitudeMonitor();     break;
-    case 4:  stageServoSweepOnly();         break;
-    case 5:  stageIrScanNoTurn();           break;
-    case 6:  stageIrOrientOnly();           break;
-    case 7:  stageExitUntilCross();         break;
-    case 8:  stageFollowUntilHog();         break;
-    case 9:  stageTurnTimed(90.0f);         break;
-    case 10: stageTurnTimed(180.0f);        break;
-    case 11: stageMotorsConstantForward();  break;
-    case 12: stageMotorToggleDemo();        break;
-    case 13: stageShooterLinkMonitor();     break;
-    case 14: stageShooterFireOnce();        break;
-    case 15: stageDriveIntoBoxUntilUsNear();break;
+    case 3:  stageExitUntilCross();         break;
+    case 4:  stageFollowUntilHog();         break;
+    case 5:  stageTurnTimed(90.0f);         break;
+    case 6:  stageTurnTimed(180.0f);        break;
+    case 7:  stageMotorsConstantForward();  break;
+    case 8:  stageMotorToggleDemo();        break;
+    case 9:  stageSwivelMotorTest();        break;
+    case 10: stageSwivelFireOnce();         break;
+    case 11: stageDriveUntilUsNear();       break;
 
     default:
       safeMotorsStop();
+      swivelMotorOff();
       digitalWrite(PIN_STATUS_LED, HIGH);
       break;
   }
