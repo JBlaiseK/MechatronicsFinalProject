@@ -25,8 +25,8 @@ struct SimpleTimer {
 // 9 = SWIVEL_STEPPER_TEST (step +90 every second)
 // 10 = SWIVEL_FIRE_ONCE (step +90 once)
 // 11 = DRIVE_UNTIL_US_NEAR
-// 12 = ESCAPE_BOX_US_THEN_CROSS
-static const uint8_t STAGE_MODE = 9;
+// 12 = ESCAPE_BOX_US_THEN_CROSS (UPDATED: turn-until-clear + backup-if-too-close, then drive to exit tape)
+static const uint8_t STAGE_MODE = 2;
 
 // Safety gate: robot will not move unless true.
 static const bool TEST_ENABLE_MOTORS = true;
@@ -34,18 +34,18 @@ static const bool TEST_ENABLE_MOTORS = true;
 // ========================= Pin Map ===========================
 
 // Tape sensors: outer-left, inner-left, inner-right, outer-right
-static const uint8_t PIN_TAPE_LO = A1;
-static const uint8_t PIN_TAPE_LI = A2;
+static const uint8_t PIN_TAPE_LO = A2;
+static const uint8_t PIN_TAPE_LI = A5;
 static const uint8_t PIN_TAPE_RI = A4;
-static const uint8_t PIN_TAPE_RO = A5;
+static const uint8_t PIN_TAPE_RO = A1;
 
 // Enable button (active-low)
 static const uint8_t PIN_ENABLE_BTN = 4;
 
 // MOTORS
 static const uint8_t PIN_L_ENA = 9;   // PWM
-static const uint8_t PIN_L_IN1 = 8;
-static const uint8_t PIN_L_IN2 = 7;
+static const uint8_t PIN_L_IN1 = 7;
+static const uint8_t PIN_L_IN2 = 8;
 
 static const uint8_t PIN_R_ENA = 10;  // PWM
 static const uint8_t PIN_R_IN1 = 12;
@@ -68,9 +68,6 @@ static const int steps90Degrees     = 50;
 static const uint8_t PIN_SWIVEL_EN = 13;
 
 // Coil pins (must NOT conflict with your bot’s other pins)
-// You cannot use 4/5 because D4=button, D5=ultrasonic trig.
-// This keeps the same constructor “style” as your test: (5,4,3,2) ordering,
-// but with safe pins.
 static const uint8_t PIN_SWIVEL_1 = 2;
 static const uint8_t PIN_SWIVEL_2 = 3;
 static const uint8_t PIN_SWIVEL_3 = A0;  // digital OK
@@ -88,15 +85,15 @@ static const int TAPE_THRESH_RI = 200;
 static const int TAPE_THRESH_RO = 200;
 
 static const int16_t SPEED_FWD    = 150;
-static const int16_t SPEED_TURN   = 255;
+static const int16_t SPEED_TURN   = 250;  // used for timed turns
 static const int16_t SPEED_SEARCH = 55;
 static const int16_t SPEED_DELTA  = 35;
 
-// Robot turn calibration ONLY
+// Robot turn calibration ONLY (timed turns)
 static const float MS_PER_DEG_ROBOT = 5.0f;
 
 // Tape crossing debounce
-static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 120;
+static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 500;
 static const uint32_t HOGLINE_DEBOUNCE_MS    = 120;
 
 // Exit box fallback timeout
@@ -112,6 +109,11 @@ static const float    US_NEAR_WALL_CM  = 12.0f;
 static const float    US_CLEAR_WALL_CM = 25.0f;
 static const uint8_t  US_NEAR_N        = 3;
 static const uint8_t  US_CLEAR_N       = 3;
+
+// ===== New “turn-until-clear + backup” tuning knobs =====
+static const float    US_TOO_CLOSE_CM  = 6.0f;   // "stuck / corner" threshold
+static const uint32_t BACKUP_TIME_MS   = 350;    // backup duration when too close
+static const int16_t  SPEED_TURN_SCAN  = 140;    // turning speed while scanning for clear path
 
 // =============== Hardware abstraction ========================
 static int readAnalogSettled(uint8_t pin);
@@ -156,6 +158,10 @@ static void motorWrite_R(int16_t cmd) {
 static void motorsStop() {
   analogWrite(PIN_L_ENA, 0);
   analogWrite(PIN_R_ENA, 0);
+}
+
+static void swivelStop() {
+  digitalWrite(PIN_SWIVEL_EN, LOW);
 }
 
 static void motorsTank(int16_t leftCmd, int16_t rightCmd) {
@@ -208,12 +214,17 @@ static bool isTapeCrossing(uint8_t bits) {
   if (ri) count++;
   if (ro) count++;
 
+  // Serial.print(lo, li, ri, ro);
+
+  Serial.print(li && ri || (count >= 3));
+
   return (li && ri) || (count >= 3);
 }
 
 static bool crossingDebounced(SimpleTimer &deb, uint32_t debounceMs) {
   uint8_t bits = readTapeBits();
   if (isTapeCrossing(bits)) {
+    Serial.println("We have detected crossing the tape!");
     if (!deb.running) deb.start(debounceMs);
     return deb.expired();
   } else {
@@ -323,8 +334,11 @@ static void ultrasonicReset() {
 // ========================== FULL FSM =========================
 typedef enum {
   F_IDLE_WAIT_ENABLE,
-  F_WAIT_FOR_WALL_AT_START,
-  F_TURN_90_TO_EXIT,
+
+  // UPDATED escape logic:
+  F_TURN_UNTIL_CLEAR,
+  F_BACKUP_FROM_WALL,
+
   F_EXIT_BOX_UNTIL_CROSS,
   F_LINE_FOLLOW_TO_HOG,
   F_FIRE_SWIVEL,
@@ -339,6 +353,7 @@ static SimpleTimer fExitDeb;
 static SimpleTimer fExitTimeout;
 static SimpleTimer fHogDeb;
 static SimpleTimer fTurnTimer;
+static SimpleTimer fBackupTimer;
 
 static bool prevBtn = false;
 
@@ -356,6 +371,7 @@ static void fullFsmResetRun() {
   fExitTimeout.stop();
   fHogDeb.stop();
   fTurnTimer.stop();
+  fBackupTimer.stop();
 
   ultrasonicReset();
   lastTapeSide = 0;
@@ -376,34 +392,50 @@ static void fullFsmLoop() {
     case F_IDLE_WAIT_ENABLE:
       safeMotorsStop();
       if (readEnableButtonPressedEdge()) {
-        Serial.println("[FULL] enable -> WAIT_FOR_WALL_AT_START");
+        Serial.println("[FULL] enable -> TURN_UNTIL_CLEAR");
         ultrasonicReset();
-        fullState = F_WAIT_FOR_WALL_AT_START;
+        fullState = F_TURN_UNTIL_CLEAR;
       }
       break;
 
-    case F_WAIT_FOR_WALL_AT_START:
-      safeMotorsStop();
-      if (!usValid) break;
+    case F_TURN_UNTIL_CLEAR: {
+      // Need at least one good reading before we trust it
+      if (!usValid) {
+        safeMotorsStop();
+        break;
+      }
 
+      // Too close: back up first, then resume turning
+      if (usDistanceCm > 0.0f && usDistanceCm <= US_TOO_CLOSE_CM) {
+        Serial.print("[FULL] too close (cm="); Serial.print(usDistanceCm);
+        Serial.println(") -> BACKUP_FROM_WALL");
+        fBackupTimer.start(BACKUP_TIME_MS);
+        fullState = F_BACKUP_FROM_WALL;
+        break;
+      }
+
+      // If wall is near, keep turning until clear
       if (testUsNearWall()) {
-        Serial.println("[FULL] wall detected -> TURN_90_TO_EXIT");
-        startTimedTurnRight(90.0f);
-        fullState = F_TURN_90_TO_EXIT;
+        safeMotorsTank(SPEED_TURN_SCAN, -SPEED_TURN_SCAN); // right turn scan (verify)
       } else {
-        Serial.println("[FULL] no wall ahead -> EXIT_BOX_UNTIL_CROSS");
+        // Clear ahead -> drive out until exit tape crossing
+        safeMotorsStop();
+        Serial.println("[FULL] clear -> EXIT_BOX_UNTIL_CROSS");
         fExitDeb.stop();
         fExitTimeout.start(EXIT_TIMEOUT_MS);
         fullState = F_EXIT_BOX_UNTIL_CROSS;
       }
-      break;
+    } break;
 
-    case F_TURN_90_TO_EXIT:
-      if (fTurnTimer.expired()) {
+    case F_BACKUP_FROM_WALL:
+      // Reverse with a slight arc to help unstick from corners
+      safeMotorsTank(-SPEED_FWD, -(SPEED_FWD / 2));
+
+      if (fBackupTimer.expired()) {
         safeMotorsStop();
-        ultrasonicReset();
-        Serial.println("[FULL] 90 done -> recheck wall");
-        fullState = F_WAIT_FOR_WALL_AT_START;
+        ultrasonicReset(); // refresh after moving
+        Serial.println("[FULL] backup done -> TURN_UNTIL_CLEAR");
+        fullState = F_TURN_UNTIL_CLEAR;
       }
       break;
 
@@ -676,6 +708,7 @@ static void stageMotorToggleDemo() {
 
 // ---- Stage 9: swivel stepper test (like your sketch) ----
 static void stageSwivelMotorTest() {
+  if (!TEST_ENABLE_MOTORS) { swivelStop(); return; }
   safeMotorsStop();
   myStepper.step(steps90Degrees);
   delay(1000);
@@ -691,6 +724,7 @@ static void stageSwivelFireOnce() {
     safeMotorsStop();
     myStepper.step(steps90Degrees);
     delay(1000);
+    swivelStop();
     markStageDone("Swivel fire complete (90 deg).");
   }
 }
@@ -715,50 +749,73 @@ static void stageDriveUntilUsNear() {
 }
 
 // ---- Stage 12: escape box using ultrasonic, then stop on exit crossing ----
-static SimpleTimer sEscTurn;
+// UPDATED per your request: turn until clear (continuous), and if too close back up then return to turning.
 static SimpleTimer sEscExitDeb;
 static SimpleTimer sEscExitTimeout;
+static SimpleTimer sEscBackupTimer;
 
-typedef enum { ESC_WAIT_VALID, ESC_TURN_90, ESC_DRIVE_OUT, ESC_DONE } EscapePhase;
-static EscapePhase escPhase = ESC_WAIT_VALID;
-static bool escStarted = false;
+typedef enum {
+  ESC_INIT,
+  ESC_TURN_UNTIL_CLEAR,
+  ESC_BACKUP,
+  ESC_DRIVE_OUT,
+  ESC_DONE
+} EscapePhase;
+
+static EscapePhase escPhase = ESC_INIT;
 
 static void stageEscapeBoxUsThenCross() {
   if (stageDone) { stageIdleBlink(); return; }
 
-  if (!escStarted) {
-    escStarted = true;
-    escPhase = ESC_WAIT_VALID;
-    Serial.println("[STAGE12] Escape box: ultrasonic clear dir then drive to exit crossing.");
-    ultrasonicReset();
-    sEscTurn.stop();
-    sEscExitDeb.stop();
-    sEscExitTimeout.start(EXIT_TIMEOUT_MS);
-    safeMotorsStop();
-  }
-
   ultrasonicUpdate();
 
   switch (escPhase) {
-    case ESC_WAIT_VALID:
+    case ESC_INIT:
+      Serial.println("[STAGE12] Escape box (smart): turn until clear, backup if too close, then drive to exit tape.");
+      ultrasonicReset();
+      sEscExitDeb.stop();
+      sEscExitTimeout.start(EXIT_TIMEOUT_MS);
+      sEscBackupTimer.stop();
       safeMotorsStop();
-      if (!usValid) return;
+      escPhase = ESC_TURN_UNTIL_CLEAR;
+      break;
 
+    case ESC_TURN_UNTIL_CLEAR:
+      // wait for a valid reading
+      if (!usValid) {
+        safeMotorsStop();
+        break;
+      }
+
+      // Too close => backup
+      if (usDistanceCm > 0.0f && usDistanceCm <= US_TOO_CLOSE_CM) {
+        Serial.print("[STAGE12] too close (cm="); Serial.print(usDistanceCm);
+        Serial.println(") -> BACKUP");
+        sEscBackupTimer.start(BACKUP_TIME_MS);
+        escPhase = ESC_BACKUP;
+        break;
+      }
+
+      // Near wall => keep turning
       if (testUsNearWall()) {
-        safeMotorsTank(SPEED_TURN, -SPEED_TURN);
-        sEscTurn.start((uint32_t)(90.0f * MS_PER_DEG_ROBOT));
-        escPhase = ESC_TURN_90;
+        safeMotorsTank(SPEED_TURN_SCAN, -SPEED_TURN_SCAN);
       } else {
+        Serial.println("[STAGE12] clear -> DRIVE_OUT");
+        safeMotorsStop();
         sEscExitDeb.stop();
         escPhase = ESC_DRIVE_OUT;
       }
       break;
 
-    case ESC_TURN_90:
-      if (sEscTurn.expired()) {
+    case ESC_BACKUP:
+      // reverse arc
+      safeMotorsTank(-SPEED_FWD, -(SPEED_FWD / 2));
+
+      if (sEscBackupTimer.expired()) {
         safeMotorsStop();
         ultrasonicReset();
-        escPhase = ESC_WAIT_VALID;
+        Serial.println("[STAGE12] backup done -> TURN_UNTIL_CLEAR");
+        escPhase = ESC_TURN_UNTIL_CLEAR;
       }
       break;
 
@@ -771,6 +828,7 @@ static void stageEscapeBoxUsThenCross() {
         escPhase = ESC_DONE;
         return;
       }
+
       if (sEscExitTimeout.expired()) {
         safeMotorsStop();
         markStageDone("Escape timeout: no exit crossing.");
@@ -816,7 +874,7 @@ void setup() {
   // Stepper enable + speed (same style as your test)
   pinMode(PIN_SWIVEL_EN, OUTPUT);
   digitalWrite(PIN_SWIVEL_EN, HIGH);
-  myStepper.setSpeed(15);
+  myStepper.setSpeed(20);
 
   safeMotorsStop();
   stageDone = false;
@@ -828,6 +886,9 @@ void setup() {
   sHogDeb.stop();
   sTurn.stop();
   sTurnStarted = false;
+
+  // reset escape test state
+  escPhase = ESC_INIT;
 
   fullFsmResetRun();
 
