@@ -26,7 +26,8 @@ struct SimpleTimer {
 // 10 = SWIVEL_FIRE_ONCE (step +90 once)
 // 11 = DRIVE_UNTIL_US_NEAR
 // 12 = ESCAPE_BOX_US_THEN_CROSS (UPDATED: turn-until-clear + backup-if-too-close, then drive to exit tape)
-static const uint8_t STAGE_MODE = 2;
+
+static const uint8_t STAGE_MODE = 12;
 
 // Safety gate: robot will not move unless true.
 static const bool TEST_ENABLE_MOTORS = true;
@@ -34,7 +35,7 @@ static const bool TEST_ENABLE_MOTORS = true;
 // ========================= Pin Map ===========================
 
 // Tape sensors: outer-left, inner-left, inner-right, outer-right
-static const uint8_t PIN_TAPE_LO = A2;
+static const uint8_t PIN_TAPE_LO = A4;
 static const uint8_t PIN_TAPE_LI = A5;
 static const uint8_t PIN_TAPE_RI = A4;
 static const uint8_t PIN_TAPE_RO = A1;
@@ -93,7 +94,7 @@ static const int16_t SPEED_DELTA  = 35;
 static const float MS_PER_DEG_ROBOT = 5.0f;
 
 // Tape crossing debounce
-static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 500;
+static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 1000;
 static const uint32_t HOGLINE_DEBOUNCE_MS    = 120;
 
 // Exit box fallback timeout
@@ -203,30 +204,25 @@ static uint8_t readTapeBits() {
 }
 
 static bool isTapeCrossing(uint8_t bits) {
-  bool li = bits & TAPE_LI;
-  bool ri = bits & TAPE_RI;
-  bool lo = bits & TAPE_LO;
-  bool ro = bits & TAPE_RO;
-
   uint8_t count = 0;
-  if (lo) count++;
-  if (li) count++;
-  if (ri) count++;
-  if (ro) count++;
-
-  // Serial.print(lo, li, ri, ro);
-
-  Serial.print(li && ri || (count >= 3));
-
-  return (li && ri) || (count >= 3);
+  if (bits & TAPE_LO) count++;
+  if (bits & TAPE_LI) count++;
+  if (bits & TAPE_RI) count++;
+  if (bits & TAPE_RO) count++;
+  return (count >= 3);
 }
 
 static bool crossingDebounced(SimpleTimer &deb, uint32_t debounceMs) {
   uint8_t bits = readTapeBits();
+
   if (isTapeCrossing(bits)) {
-    Serial.println("We have detected crossing the tape!");
     if (!deb.running) deb.start(debounceMs);
-    return deb.expired();
+
+    if (deb.expired()) {
+      Serial.println("[TAPE] debounced crossing TRUE");
+      return true;
+    }
+    return false;
   } else {
     deb.stop();
     return false;
@@ -291,7 +287,10 @@ static float ultrasonicReadOnceCm() {
   digitalWrite(PIN_US_TRIG, LOW);
 
   unsigned long duration = pulseIn(PIN_US_ECHO, HIGH, US_ECHO_TIMEOUT_US);
-  if (duration == 0) return -1.0f;
+  
+  // If it times out, the wall is out of range. 
+  // Treat this as "infinity" (e.g., 999 cm) so the robot knows the path is clear.
+  if (duration == 0) return 999.0f; 
 
   return (float)duration * US_CM_PER_US;
 }
@@ -302,13 +301,19 @@ static void ultrasonicUpdate() {
   usLastPingMs = now;
 
   float cm = ultrasonicReadOnceCm();
-  if (cm <= 0.0f) { usValid = false; return; }
+  
+  // Reject physically impossible ghost readings (e.g., sensor minimum is usually ~2cm)
+  if (cm < 2.0f) {
+    return; // Ignore this reading entirely, keep previous state
+  }
 
   usValid = true;
 
+  // EMA Filter
   if (usDistanceCm <= 0.0f) usDistanceCm = cm;
   else usDistanceCm = 0.6f * usDistanceCm + 0.4f * cm;
 
+  // Hysteresis logic
   if (usDistanceCm <= US_NEAR_WALL_CM) { usNearCount++; usClearCount = 0; }
   else if (usDistanceCm >= US_CLEAR_WALL_CM) { usClearCount++; usNearCount = 0; }
   else { usNearCount = 0; usClearCount = 0; }
@@ -687,7 +692,7 @@ static bool buttonEdgeForToggle() {
   return edge;
 }
 
-static void stageMotorToggleDemo() {
+static void     stageMotorToggleDemo() {
   if (!TEST_ENABLE_MOTORS) { safeMotorsStop(); return; }
 
   if (buttonEdgeForToggle()) {
@@ -748,101 +753,197 @@ static void stageDriveUntilUsNear() {
   }
 }
 
-// ---- Stage 12: escape box using ultrasonic, then stop on exit crossing ----
-// UPDATED per your request: turn until clear (continuous), and if too close back up then return to turning.
-static SimpleTimer sEscExitDeb;
-static SimpleTimer sEscExitTimeout;
-static SimpleTimer sEscBackupTimer;
+// ---- Stage 12: escape box (reactive) ----
+// Behavior (updated):
+//   - If TOO CLOSE -> back up (arc) until not-too-close, THEN do a short turn-in-place
+//   - Else if NEAR WALL -> turn in place
+//   - Else -> drive forward
+//   - NEW: while DRIVING, if ultrasonic distance is consistently *decreasing* (getting closer),
+//          immediately enter BACKUP -> TURN to avoid “driving into the wall”
+//   - Stop when we detect a debounced "exit crossing" (strict 3-of-4)
 
-typedef enum {
-  ESC_INIT,
-  ESC_TURN_UNTIL_CLEAR,
-  ESC_BACKUP,
-  ESC_DRIVE_OUT,
-  ESC_DONE
-} EscapePhase;
+static const int16_t SPEED_FWD_ESCAPE   = 175;
+static const int16_t SPEED_TURN_ESCAPE  = 150;
+static const int16_t SPEED_BACKUP_L     = -175;
+static const int16_t SPEED_BACKUP_R     = -150;  // reverse arc
 
-static EscapePhase escPhase = ESC_INIT;
+// Tape detection: strict crossing + debounced by consecutive samples (no timers)
+static const uint8_t ARM_N_SAMPLES      = 8;
+static const uint8_t CROSS_N_SAMPLES    = 8;
+
+static bool    sEscArmed = false;
+static uint8_t sEscArmCount = 0;
+static uint8_t sEscCrossCount = 0;
+
+// Backup mode latch (so we keep backing until we're really free)
+static bool    sEscBackupMode = false;
+static uint8_t sEscBackupClearCount = 0;
+static const uint8_t BACKUP_CLEAR_N = 4;
+
+// NEW: after backup, do a short turn-in-place (counts in *ultrasonic updates*)
+static uint8_t sEscPostBackupTurnCount = 0;
+static const uint8_t POST_BACKUP_TURN_N = 12;  // ~12*60ms ≈ 0.7s
+
+// NEW: "getting closer while driving" detector (counts in *ultrasonic updates*)
+static float    sEscLastCm = -1.0f;
+static uint8_t  sEscCloserCount = 0;
+static const float   CLOSER_DELTA_CM = 4.0f;  // must drop by at least this much to count
+static const uint8_t CLOSER_N = 2;            // require 2 consecutive drops
+
+// Track ultrasonic updates so counters only change when a new reading arrives
+static uint32_t sEscLastUsPingMs = 0;
+
+static bool isExitCrossingStrict(uint8_t bits) {
+  uint8_t count = 0;
+  if (bits & TAPE_LO) count++;
+  if (bits & TAPE_LI) count++;
+  if (bits & TAPE_RI) count++;
+  if (bits & TAPE_RO) count++;
+  return (count >= 3);
+}
+
+// returns true once we have a debounced crossing
+static bool exitCrossingStableNoTimers() {
+  uint8_t bits = readTapeBits();
+  bool crossingNow = isExitCrossingStrict(bits);
+
+  // Arm gate: require stable NOT-crossing first
+  if (!sEscArmed) {
+    if (!crossingNow) {
+      if (sEscArmCount < 255) sEscArmCount++;
+      if (sEscArmCount >= ARM_N_SAMPLES) {
+        sEscArmed = true;
+      }
+    } else {
+      sEscArmCount = 0;
+    }
+    return false;
+  }
+
+  // Debounce crossing by consecutive samples
+  if (crossingNow) {
+    if (sEscCrossCount < 255) sEscCrossCount++;
+    if (sEscCrossCount >= CROSS_N_SAMPLES) return true;
+  } else {
+    sEscCrossCount = 0;
+  }
+
+  return false;
+}
 
 static void stageEscapeBoxUsThenCross() {
   if (stageDone) { stageIdleBlink(); return; }
 
+  // Update ultrasonic
   ultrasonicUpdate();
 
-  switch (escPhase) {
-    case ESC_INIT:
-      Serial.println("[STAGE12] Escape box (smart): turn until clear, backup if too close, then drive to exit tape.");
-      ultrasonicReset();
-      sEscExitDeb.stop();
-      sEscExitTimeout.start(EXIT_TIMEOUT_MS);
-      sEscBackupTimer.stop();
-      safeMotorsStop();
-      escPhase = ESC_TURN_UNTIL_CLEAR;
-      break;
-
-    case ESC_TURN_UNTIL_CLEAR:
-      // wait for a valid reading
-      if (!usValid) {
-        safeMotorsStop();
-        break;
-      }
-
-      // Too close => backup
-      if (usDistanceCm > 0.0f && usDistanceCm <= US_TOO_CLOSE_CM) {
-        Serial.print("[STAGE12] too close (cm="); Serial.print(usDistanceCm);
-        Serial.println(") -> BACKUP");
-        sEscBackupTimer.start(BACKUP_TIME_MS);
-        escPhase = ESC_BACKUP;
-        break;
-      }
-
-      // Near wall => keep turning
-      if (testUsNearWall()) {
-        safeMotorsTank(SPEED_TURN_SCAN, -SPEED_TURN_SCAN);
-      } else {
-        Serial.println("[STAGE12] clear -> DRIVE_OUT");
-        safeMotorsStop();
-        sEscExitDeb.stop();
-        escPhase = ESC_DRIVE_OUT;
-      }
-      break;
-
-    case ESC_BACKUP:
-      // reverse arc
-      safeMotorsTank(-SPEED_FWD, -(SPEED_FWD / 2));
-
-      if (sEscBackupTimer.expired()) {
-        safeMotorsStop();
-        ultrasonicReset();
-        Serial.println("[STAGE12] backup done -> TURN_UNTIL_CLEAR");
-        escPhase = ESC_TURN_UNTIL_CLEAR;
-      }
-      break;
-
-    case ESC_DRIVE_OUT:
-      safeMotorsTank(SPEED_FWD, SPEED_FWD);
-
-      if (crossingDebounced(sEscExitDeb, EXIT_CROSS_DEBOUNCE_MS)) {
-        safeMotorsStop();
-        markStageDone("Escaped box: exit crossing detected.");
-        escPhase = ESC_DONE;
-        return;
-      }
-
-      if (sEscExitTimeout.expired()) {
-        safeMotorsStop();
-        markStageDone("Escape timeout: no exit crossing.");
-        escPhase = ESC_DONE;
-        return;
-      }
-      break;
-
-    case ESC_DONE:
-    default:
-      safeMotorsStop();
-      break;
+  // Did we get a NEW accepted ultrasonic reading this loop?
+  bool usUpdated = false;
+  if (usValid && (usLastPingMs != sEscLastUsPingMs)) {
+    sEscLastUsPingMs = usLastPingMs;
+    usUpdated = true;
   }
+
+  // If we crossed the exit line, stop immediately
+  if (exitCrossingStableNoTimers()) {
+    safeMotorsStop();
+    markStageDone("Escaped box: exit crossing detected.");
+    return;
+  }
+
+  // If ultrasonic isn't valid yet, don't move (safe)
+  if (!usValid) {
+    safeMotorsStop();
+    return;
+  }
+
+  // Debug every ~300ms
+  static uint32_t lastDbg = 0;
+  if (millis() - lastDbg > 300) {
+    lastDbg = millis();
+    Serial.print("[STAGE12] usCm="); Serial.print(usDistanceCm);
+    Serial.print(" near="); Serial.print(usNearWall ? "Y" : "N");
+    Serial.print(" backup="); Serial.print(sEscBackupMode ? "Y" : "N");
+    Serial.print(" postTurn="); Serial.println(sEscPostBackupTurnCount);
+  }
+
+  // 0) If we're in the "post-backup turn", do it and return
+  if (sEscPostBackupTurnCount > 0) {
+    safeMotorsTank(SPEED_TURN_ESCAPE, -SPEED_TURN_ESCAPE);
+    if (usUpdated) {
+      sEscPostBackupTurnCount--;
+      // keep last distance fresh so the "getting closer" detector doesn't trigger immediately
+      sEscLastCm = usDistanceCm;
+      sEscCloserCount = 0;
+    }
+    return;
+  }
+
+  // 1) Too close => backup mode (corner case)
+  if (usDistanceCm > 0.0f && usDistanceCm <= US_TOO_CLOSE_CM) {
+    sEscBackupMode = true;
+    sEscBackupClearCount = 0;
+    // reset trend detector while backing
+    sEscCloserCount = 0;
+    sEscLastCm = usDistanceCm;
+  }
+
+  if (sEscBackupMode) {
+    // Back up in an arc until we're no longer too close for a few samples
+    safeMotorsTank(SPEED_BACKUP_L, SPEED_BACKUP_R);
+
+    if (usUpdated) {
+      if (usDistanceCm > (US_TOO_CLOSE_CM + 2.0f)) {
+        if (sEscBackupClearCount < 255) sEscBackupClearCount++;
+        if (sEscBackupClearCount >= BACKUP_CLEAR_N) {
+          sEscBackupMode = false;
+          safeMotorsStop();
+          // NEW: after backing up, force a short turn to "get out of the state"
+          sEscPostBackupTurnCount = POST_BACKUP_TURN_N;
+          // keep trend detector calm
+          sEscCloserCount = 0;
+          sEscLastCm = usDistanceCm;
+        }
+      } else {
+        sEscBackupClearCount = 0;
+      }
+    }
+    return;
+  }
+
+  // 2) Not too close: near wall => turn
+  if (testUsNearWall()) {
+    safeMotorsTank(SPEED_TURN_ESCAPE, -SPEED_TURN_ESCAPE);
+    if (usUpdated) {
+      sEscLastCm = usDistanceCm;
+      sEscCloserCount = 0; // we're turning; don't use "getting closer" logic here
+    }
+    return;
+  }
+
+  // 3) Clear: drive forward — BUT if we're getting closer while driving, back up + turn
+  if (usUpdated) {
+    if (sEscLastCm > 0.0f && (usDistanceCm < (sEscLastCm - CLOSER_DELTA_CM))) {
+      if (sEscCloserCount < 255) sEscCloserCount++;
+    } else {
+      sEscCloserCount = 0;
+    }
+    sEscLastCm = usDistanceCm;
+  }
+
+  if (sEscCloserCount >= CLOSER_N) {
+    // We’re approaching something while driving: back up + then turn
+    sEscBackupMode = true;
+    sEscBackupClearCount = 0;
+    sEscCloserCount = 0;
+    return;
+  }
+
+  safeMotorsTank(SPEED_FWD_ESCAPE, SPEED_FWD_ESCAPE);
 }
+
+
+
 
 // ===================== Arduino setup/loop ====================
 void setup() {
@@ -887,8 +988,25 @@ void setup() {
   sTurn.stop();
   sTurnStarted = false;
 
+
+    // reset Stage 12 state
+  sEscArmed = false;
+  sEscArmCount = 0;
+  sEscCrossCount = 0;
+
+  sEscBackupMode = false;
+  sEscBackupClearCount = 0;
+
+  sEscPostBackupTurnCount = 0;
+
+  sEscLastCm = -1.0f;
+  sEscCloserCount = 0;
+
+  sEscLastUsPingMs = 0;
+  
+
   // reset escape test state
-  escPhase = ESC_INIT;
+  // escPhase = ESC_INIT;
 
   fullFsmResetRun();
 
