@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Stepper.h>
 
 // ========================= Timers ============================
 struct SimpleTimer {
@@ -12,7 +13,6 @@ struct SimpleTimer {
 };
 
 // ===================== STAGE SELECT HERE =====================
-
 // 0 = FULL_FSM
 // 1 = TAPE_MONITOR_RAW
 // 2 = ULTRASONIC_MONITOR
@@ -22,13 +22,14 @@ struct SimpleTimer {
 // 6 = TURN_180_TIMED
 // 7 = MOTORS_CONSTANT_FORWARD
 // 8 = MOTORS_TOGGLE_DIRECTION_DEMO
-// 9 = SWIVEL_MOTOR_TEST
-// 10 = SWIVEL_FIRE_ONCE
+// 9 = SWIVEL_STEPPER_TEST (step +90 every second)
+// 10 = SWIVEL_FIRE_ONCE (step +90 once)
 // 11 = DRIVE_UNTIL_US_NEAR
-static const uint8_t STAGE_MODE = 1;
+// 12 = ESCAPE_BOX_US_THEN_CROSS
+static const uint8_t STAGE_MODE = 9;
 
 // Safety gate: robot will not move unless true.
-static const bool TEST_ENABLE_MOTORS = false;
+static const bool TEST_ENABLE_MOTORS = true;
 
 // ========================= Pin Map ===========================
 
@@ -50,16 +51,33 @@ static const uint8_t PIN_R_ENA = 10;  // PWM
 static const uint8_t PIN_R_IN1 = 12;
 static const uint8_t PIN_R_IN2 = 11;
 
-// Status LED
-static const uint8_t PIN_STATUS_LED = 13;
+// Status LED (disabled because you’re using D13 as stepper enable)
+static const uint8_t PIN_STATUS_LED = 255;
 
 // Ultrasonic (HC-SR04 style)
 static const uint8_t PIN_US_TRIG = 5;
 static const uint8_t PIN_US_ECHO = 6;
 
-// Swivel / puck deploy motor
-// ASSUMPTION: simple ON/OFF control through one digital pin
-static const uint8_t PIN_SWIVEL_MOTOR = 3;
+// ===================== Swivel Stepper (test-sketch style) ========================
+
+// 200 steps = 360 degrees
+static const int stepsPerRevolution = 200;
+static const int steps90Degrees     = 50;
+
+// Enable pin (must be HIGH for motor to move) — per your test
+static const uint8_t PIN_SWIVEL_EN = 13;
+
+// Coil pins (must NOT conflict with your bot’s other pins)
+// You cannot use 4/5 because D4=button, D5=ultrasonic trig.
+// This keeps the same constructor “style” as your test: (5,4,3,2) ordering,
+// but with safe pins.
+static const uint8_t PIN_SWIVEL_1 = 2;
+static const uint8_t PIN_SWIVEL_2 = 3;
+static const uint8_t PIN_SWIVEL_3 = A0;  // digital OK
+static const uint8_t PIN_SWIVEL_4 = A3;  // digital OK
+
+// Initialize the stepper (same ordering pattern as your test)
+static Stepper myStepper(stepsPerRevolution, PIN_SWIVEL_4, PIN_SWIVEL_3, PIN_SWIVEL_2, PIN_SWIVEL_1);
 
 // ======================== Constants ==========================
 
@@ -69,7 +87,7 @@ static const int TAPE_THRESH_LI = 200;
 static const int TAPE_THRESH_RI = 200;
 static const int TAPE_THRESH_RO = 200;
 
-static const int16_t SPEED_FWD    = 255;
+static const int16_t SPEED_FWD    = 150;
 static const int16_t SPEED_TURN   = 255;
 static const int16_t SPEED_SEARCH = 55;
 static const int16_t SPEED_DELTA  = 35;
@@ -84,9 +102,6 @@ static const uint32_t HOGLINE_DEBOUNCE_MS    = 120;
 // Exit box fallback timeout
 static const uint32_t EXIT_TIMEOUT_MS = 3000;
 
-// Swivel motor timing
-static const uint32_t SWIVEL_FIRE_TIME_MS = 2500;
-
 // Ultrasonic
 static const uint32_t US_PING_INTERVAL_MS = 60;
 static const uint32_t US_ECHO_TIMEOUT_US  = 25000;
@@ -99,11 +114,17 @@ static const uint8_t  US_NEAR_N        = 3;
 static const uint8_t  US_CLEAR_N       = 3;
 
 // =============== Hardware abstraction ========================
-
 static int readAnalogSettled(uint8_t pin);
 
-// ===================== Motor Driver (ENA/IN1/IN2) =====================
+// ===================== Status LED helpers ====================
+static inline void statusLedInit() {
+  if (PIN_STATUS_LED != 255) pinMode(PIN_STATUS_LED, OUTPUT);
+}
+static inline void statusLedWrite(bool on) {
+  if (PIN_STATUS_LED != 255) digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW);
+}
 
+// ===================== Motor Driver (ENA/IN1/IN2) =====================
 static inline uint8_t clampPwm(int16_t x) {
   if (x < 0) x = -x;
   if (x > 255) x = 255;
@@ -111,39 +132,23 @@ static inline uint8_t clampPwm(int16_t x) {
 }
 
 static void setMotorDirection_L(bool forward) {
-  if (forward) {
-    digitalWrite(PIN_L_IN1, HIGH);
-    digitalWrite(PIN_L_IN2, LOW);
-  } else {
-    digitalWrite(PIN_L_IN1, LOW);
-    digitalWrite(PIN_L_IN2, HIGH);
-  }
+  if (forward) { digitalWrite(PIN_L_IN1, HIGH); digitalWrite(PIN_L_IN2, LOW); }
+  else         { digitalWrite(PIN_L_IN1, LOW);  digitalWrite(PIN_L_IN2, HIGH); }
 }
 
 static void setMotorDirection_R(bool forward) {
-  if (forward) {
-    digitalWrite(PIN_R_IN1, HIGH);
-    digitalWrite(PIN_R_IN2, LOW);
-  } else {
-    digitalWrite(PIN_R_IN1, LOW);
-    digitalWrite(PIN_R_IN2, HIGH);
-  }
+  if (forward) { digitalWrite(PIN_R_IN1, HIGH); digitalWrite(PIN_R_IN2, LOW); }
+  else         { digitalWrite(PIN_R_IN1, LOW);  digitalWrite(PIN_R_IN2, HIGH); }
 }
 
 static void motorWrite_L(int16_t cmd) {
-  if (cmd == 0) {
-    analogWrite(PIN_L_ENA, 0);
-    return;
-  }
+  if (cmd == 0) { analogWrite(PIN_L_ENA, 0); return; }
   setMotorDirection_L(cmd > 0);
   analogWrite(PIN_L_ENA, clampPwm(cmd));
 }
 
 static void motorWrite_R(int16_t cmd) {
-  if (cmd == 0) {
-    analogWrite(PIN_R_ENA, 0);
-    return;
-  }
+  if (cmd == 0) { analogWrite(PIN_R_ENA, 0); return; }
   setMotorDirection_R(cmd > 0);
   analogWrite(PIN_R_ENA, clampPwm(cmd));
 }
@@ -167,18 +172,7 @@ static void safeMotorsStop() {
   motorsStop();
 }
 
-// ===================== Swivel Motor =====================
-
-static void swivelMotorOn() {
-  digitalWrite(PIN_SWIVEL_MOTOR, HIGH);
-}
-
-static void swivelMotorOff() {
-  digitalWrite(PIN_SWIVEL_MOTOR, LOW);
-}
-
 // ========================== Tape =============================
-
 enum TapeBits : uint8_t {
   TAPE_NONE  = 0,
   TAPE_LO    = 1 << 0,
@@ -246,7 +240,6 @@ static void updateTapeMemory(uint8_t bits) {
   else lastTapeSide = 0;
 }
 
-// Finds line and then sticks to it
 static void lineFollowStep() {
   uint8_t bits = readTapeBits();
   updateTapeMemory(bits);
@@ -256,54 +249,21 @@ static void lineFollowStep() {
   bool ri = bits & TAPE_RI;
   bool ro = bits & TAPE_RO;
 
-  // centered / ideal
-  if (li && ri && !lo && !ro) {
-    safeMotorsTank(SPEED_FWD, SPEED_FWD);
-    return;
-  }
+  if (li && ri && !lo && !ro) { safeMotorsTank(SPEED_FWD, SPEED_FWD); return; }
+  if (isTapeCrossing(bits))   { safeMotorsTank(SPEED_FWD, SPEED_FWD); return; }
 
-  // strong crossing / broad tape
-  if (isTapeCrossing(bits)) {
-    safeMotorsTank(SPEED_FWD, SPEED_FWD);
-    return;
-  }
+  if (li && !ri && !lo) { safeMotorsTank(SPEED_FWD - SPEED_DELTA, SPEED_FWD + SPEED_DELTA); return; }
+  if (ri && !li && !ro) { safeMotorsTank(SPEED_FWD + SPEED_DELTA, SPEED_FWD - SPEED_DELTA); return; }
 
-  // slight left
-  if (li && !ri && !lo) {
-    safeMotorsTank(SPEED_FWD - SPEED_DELTA, SPEED_FWD + SPEED_DELTA);
-    return;
-  }
+  if (lo) { safeMotorsTank(SPEED_FWD - 2 * SPEED_DELTA, SPEED_FWD + 2 * SPEED_DELTA); return; }
+  if (ro) { safeMotorsTank(SPEED_FWD + 2 * SPEED_DELTA, SPEED_FWD - 2 * SPEED_DELTA); return; }
 
-  // slight right
-  if (ri && !li && !ro) {
-    safeMotorsTank(SPEED_FWD + SPEED_DELTA, SPEED_FWD - SPEED_DELTA);
-    return;
-  }
-
-  // strong left
-  if (lo) {
-    safeMotorsTank(SPEED_FWD - 2 * SPEED_DELTA, SPEED_FWD + 2 * SPEED_DELTA);
-    return;
-  }
-
-  // strong right
-  if (ro) {
-    safeMotorsTank(SPEED_FWD + 2 * SPEED_DELTA, SPEED_FWD - 2 * SPEED_DELTA);
-    return;
-  }
-
-  // lost tape completely -> recovery
-  if (lastTapeSide < 0) {
-    safeMotorsTank(-SPEED_SEARCH, SPEED_SEARCH);
-  } else if (lastTapeSide > 0) {
-    safeMotorsTank(SPEED_SEARCH, -SPEED_SEARCH);
-  } else {
-    safeMotorsTank(SPEED_SEARCH, SPEED_SEARCH);
-  }
+  if (lastTapeSide < 0) safeMotorsTank(-SPEED_SEARCH, SPEED_SEARCH);
+  else if (lastTapeSide > 0) safeMotorsTank(SPEED_SEARCH, -SPEED_SEARCH);
+  else safeMotorsTank(SPEED_SEARCH, SPEED_SEARCH);
 }
 
 // ======================== Ultrasonic =========================
-
 static uint32_t usLastPingMs = 0;
 static float    usDistanceCm = -1.0f;
 static bool     usValid = false;
@@ -331,26 +291,16 @@ static void ultrasonicUpdate() {
   usLastPingMs = now;
 
   float cm = ultrasonicReadOnceCm();
-  if (cm <= 0.0f) {
-    usValid = false;
-    return;
-  }
+  if (cm <= 0.0f) { usValid = false; return; }
 
   usValid = true;
 
   if (usDistanceCm <= 0.0f) usDistanceCm = cm;
   else usDistanceCm = 0.6f * usDistanceCm + 0.4f * cm;
 
-  if (usDistanceCm <= US_NEAR_WALL_CM) {
-    usNearCount++;
-    usClearCount = 0;
-  } else if (usDistanceCm >= US_CLEAR_WALL_CM) {
-    usClearCount++;
-    usNearCount = 0;
-  } else {
-    usNearCount = 0;
-    usClearCount = 0;
-  }
+  if (usDistanceCm <= US_NEAR_WALL_CM) { usNearCount++; usClearCount = 0; }
+  else if (usDistanceCm >= US_CLEAR_WALL_CM) { usClearCount++; usNearCount = 0; }
+  else { usNearCount = 0; usClearCount = 0; }
 
   if (usNearCount >= US_NEAR_N) usNearWall = true;
   if (usClearCount >= US_CLEAR_N) usNearWall = false;
@@ -371,7 +321,6 @@ static void ultrasonicReset() {
 }
 
 // ========================== FULL FSM =========================
-
 typedef enum {
   F_IDLE_WAIT_ENABLE,
   F_WAIT_FOR_WALL_AT_START,
@@ -390,7 +339,6 @@ static SimpleTimer fExitDeb;
 static SimpleTimer fExitTimeout;
 static SimpleTimer fHogDeb;
 static SimpleTimer fTurnTimer;
-static SimpleTimer fFireTimer;
 
 static bool prevBtn = false;
 
@@ -408,18 +356,16 @@ static void fullFsmResetRun() {
   fExitTimeout.stop();
   fHogDeb.stop();
   fTurnTimer.stop();
-  fFireTimer.stop();
 
   ultrasonicReset();
   lastTapeSide = 0;
 
-  swivelMotorOff();
   safeMotorsStop();
 }
 
 static void startTimedTurnRight(float deg) {
   uint32_t ms = (uint32_t)(deg * MS_PER_DEG_ROBOT);
-  safeMotorsTank(SPEED_TURN, -SPEED_TURN);   // verify this is actually RIGHT for your wiring
+  safeMotorsTank(SPEED_TURN, -SPEED_TURN);
   fTurnTimer.start(ms);
 }
 
@@ -429,8 +375,6 @@ static void fullFsmLoop() {
   switch (fullState) {
     case F_IDLE_WAIT_ENABLE:
       safeMotorsStop();
-      swivelMotorOff();
-
       if (readEnableButtonPressedEdge()) {
         Serial.println("[FULL] enable -> WAIT_FOR_WALL_AT_START");
         ultrasonicReset();
@@ -440,13 +384,8 @@ static void fullFsmLoop() {
 
     case F_WAIT_FOR_WALL_AT_START:
       safeMotorsStop();
+      if (!usValid) break;
 
-      // wait until we have at least one real ultrasonic reading
-      if (!usValid) {
-        break;
-      }
-
-      // keep turning 90 until front is no longer blocked
       if (testUsNearWall()) {
         Serial.println("[FULL] wall detected -> TURN_90_TO_EXIT");
         startTimedTurnRight(90.0f);
@@ -490,11 +429,8 @@ static void fullFsmLoop() {
 
     case F_LINE_FOLLOW_TO_HOG:
       lineFollowStep();
-
       if (crossingDebounced(fHogDeb, HOGLINE_DEBOUNCE_MS)) {
         safeMotorsStop();
-        swivelMotorOn();
-        fFireTimer.start(SWIVEL_FIRE_TIME_MS);
         Serial.println("[FULL] hogline crossing -> FIRE_SWIVEL");
         fullState = F_FIRE_SWIVEL;
       }
@@ -502,13 +438,12 @@ static void fullFsmLoop() {
 
     case F_FIRE_SWIVEL:
       safeMotorsStop();
-
-      if (fFireTimer.expired()) {
-        swivelMotorOff();
-        Serial.println("[FULL] fire done -> TURN_180_AFTER_FIRE");
-        startTimedTurnRight(180.0f);
-        fullState = F_TURN_180_AFTER_FIRE;
-      }
+      Serial.println("[FULL] firing swivel (stepper +90) ...");
+      myStepper.step(steps90Degrees);
+      delay(1000);
+      Serial.println("[FULL] fire done -> TURN_180_AFTER_FIRE");
+      startTimedTurnRight(180.0f);
+      fullState = F_TURN_180_AFTER_FIRE;
       break;
 
     case F_TURN_180_AFTER_FIRE:
@@ -522,7 +457,6 @@ static void fullFsmLoop() {
 
     case F_DRIVE_TO_WALL:
       safeMotorsTank(SPEED_FWD, SPEED_FWD);
-
       if (testUsNearWall()) {
         safeMotorsStop();
         Serial.println("[FULL] wall reached -> DONE");
@@ -533,29 +467,18 @@ static void fullFsmLoop() {
     case F_DONE:
     default:
       safeMotorsStop();
-      swivelMotorOff();
-
-      static uint32_t last = 0;
-      static bool on = false;
-      if (millis() - last > 600) {
-        last = millis();
-        on = !on;
-        digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW);
-      }
       break;
   }
 }
 
 // ============================================================
 // ===================== Stage/Test Runner =====================
-
 static bool stageDone = false;
 
 static void markStageDone(const char *msg) {
   if (stageDone) return;
   stageDone = true;
   safeMotorsStop();
-  swivelMotorOff();
   Serial.print("[STAGE DONE] ");
   Serial.println(msg);
 }
@@ -566,7 +489,7 @@ static void stageIdleBlink() {
   if (millis() - last > 350) {
     last = millis();
     on = !on;
-    digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW);
+    statusLedWrite(on);
   }
 }
 
@@ -581,9 +504,10 @@ static const char* stageName(uint8_t s) {
     case 6:  return "TURN_180_TIMED";
     case 7:  return "MOTORS_CONSTANT_FORWARD";
     case 8:  return "MOTORS_TOGGLE_DIRECTION_DEMO";
-    case 9:  return "SWIVEL_MOTOR_TEST";
+    case 9:  return "SWIVEL_STEPPER_TEST";
     case 10: return "SWIVEL_FIRE_ONCE";
     case 11: return "DRIVE_UNTIL_US_NEAR";
+    case 12: return "ESCAPE_BOX_US_THEN_CROSS";
     default: return "UNKNOWN";
   }
 }
@@ -591,7 +515,6 @@ static const char* stageName(uint8_t s) {
 // ---- Stage 1: tape monitor ----
 static void stageTapeMonitorRaw() {
   safeMotorsStop();
-  swivelMotorOff();
 
   static uint32_t last = 0;
   if (millis() - last < 120) return;
@@ -619,7 +542,6 @@ static void stageTapeMonitorRaw() {
 // ---- Stage 2: ultrasonic monitor ----
 static void stageUltrasonicMonitor() {
   safeMotorsStop();
-  swivelMotorOff();
   ultrasonicUpdate();
 
   static uint32_t last = 0;
@@ -691,13 +613,10 @@ static void stageTurnTimed(float deg) {
     sTurnStarted = true;
 
     uint32_t ms = (uint32_t)(deg * MS_PER_DEG_ROBOT);
+    Serial.print("[STAGE] Timed turn deg="); Serial.print(deg);
+    Serial.print(" ms="); Serial.println(ms);
 
-    Serial.print("[STAGE] Timed turn deg=");
-    Serial.print(deg);
-    Serial.print(" ms=");
-    Serial.println(ms);
-
-    safeMotorsTank(SPEED_TURN, -SPEED_TURN);   // keep consistent with startTimedTurnRight()
+    safeMotorsTank(SPEED_TURN, -SPEED_TURN);
     sTurn.start(ms);
   }
 
@@ -709,8 +628,6 @@ static void stageTurnTimed(float deg) {
 
 // ---- Stage 7: motors constant forward ----
 static void stageMotorsConstantForward() {
-  swivelMotorOff();
-
   if (!TEST_ENABLE_MOTORS) {
     safeMotorsStop();
     static uint32_t last = 0;
@@ -720,15 +637,7 @@ static void stageMotorsConstantForward() {
     }
     return;
   }
-
   safeMotorsTank(SPEED_FWD, SPEED_FWD);
-
-  static uint32_t last = 0;
-  if (millis() - last > 250) {
-    last = millis();
-    Serial.print("[STAGE] motors L="); Serial.print(SPEED_FWD);
-    Serial.print(" R="); Serial.println(SPEED_FWD);
-  }
 }
 
 // ---- Stage 8: motor direction toggle demo ----
@@ -747,85 +656,42 @@ static bool buttonEdgeForToggle() {
 }
 
 static void stageMotorToggleDemo() {
-  swivelMotorOff();
-
-  if (!TEST_ENABLE_MOTORS) {
-    safeMotorsStop();
-    static uint32_t last = 0;
-    if (millis() - last > 500) {
-      last = millis();
-      Serial.println("[STAGE8] motors disabled (TEST_ENABLE_MOTORS=false).");
-    }
-    return;
-  }
+  if (!TEST_ENABLE_MOTORS) { safeMotorsStop(); return; }
 
   if (buttonEdgeForToggle()) {
-    if (dirState == WAITING) {
-      dirState = RUNNING;
-      lastToggleMs = millis();
-      Serial.println("[STAGE8] RUNNING");
-    } else {
-      dirState = WAITING;
-      Serial.println("[STAGE8] WAITING");
-    }
+    if (dirState == WAITING) { dirState = RUNNING; lastToggleMs = millis(); }
+    else { dirState = WAITING; }
   }
 
-  if (dirState == WAITING) {
-    safeMotorsStop();
-    return;
-  }
+  if (dirState == WAITING) { safeMotorsStop(); return; }
 
   if (millis() - lastToggleMs >= TIME_DELAY_MS) {
     lastToggleMs += TIME_DELAY_MS;
     isForward = !isForward;
-    Serial.print("[STAGE8] Toggled -> ");
-    Serial.println(isForward ? "forward" : "backward");
   }
 
   if (isForward) safeMotorsTank(SPEED_FWD, SPEED_FWD);
-  else           safeMotorsTank(-SPEED_FWD, -SPEED_FWD);
+  else safeMotorsTank(-SPEED_FWD, -SPEED_FWD);
 }
 
-// ---- Stage 9: swivel motor monitor ----
+// ---- Stage 9: swivel stepper test (like your sketch) ----
 static void stageSwivelMotorTest() {
   safeMotorsStop();
-
-  static bool on = false;
-  static uint32_t last = 0;
-
-  if (millis() - last > 1000) {
-    last = millis();
-    on = !on;
-
-    if (on) {
-      swivelMotorOn();
-      Serial.println("[STAGE9] swivel ON");
-    } else {
-      swivelMotorOff();
-      Serial.println("[STAGE9] swivel OFF");
-    }
-  }
+  myStepper.step(steps90Degrees);
+  delay(1000);
 }
 
-// ---- Stage 10: swivel fire once ----
+// ---- Stage 10: swivel fire once (like your sketch) ----
 static void stageSwivelFireOnce() {
   if (stageDone) { stageIdleBlink(); return; }
 
   static bool started = false;
-  static SimpleTimer fireOnceTimer;
-
   if (!started) {
     started = true;
-    Serial.println("[STAGE10] swivel fire once.");
-    swivelMotorOn();
-    fireOnceTimer.start(SWIVEL_FIRE_TIME_MS);
-  }
-
-  safeMotorsStop();
-
-  if (fireOnceTimer.expired()) {
-    swivelMotorOff();
-    markStageDone("Swivel fire complete.");
+    safeMotorsStop();
+    myStepper.step(steps90Degrees);
+    delay(1000);
+    markStageDone("Swivel fire complete (90 deg).");
   }
 }
 
@@ -848,11 +714,82 @@ static void stageDriveUntilUsNear() {
   }
 }
 
-// ===================== Arduino setup/loop ====================
+// ---- Stage 12: escape box using ultrasonic, then stop on exit crossing ----
+static SimpleTimer sEscTurn;
+static SimpleTimer sEscExitDeb;
+static SimpleTimer sEscExitTimeout;
 
+typedef enum { ESC_WAIT_VALID, ESC_TURN_90, ESC_DRIVE_OUT, ESC_DONE } EscapePhase;
+static EscapePhase escPhase = ESC_WAIT_VALID;
+static bool escStarted = false;
+
+static void stageEscapeBoxUsThenCross() {
+  if (stageDone) { stageIdleBlink(); return; }
+
+  if (!escStarted) {
+    escStarted = true;
+    escPhase = ESC_WAIT_VALID;
+    Serial.println("[STAGE12] Escape box: ultrasonic clear dir then drive to exit crossing.");
+    ultrasonicReset();
+    sEscTurn.stop();
+    sEscExitDeb.stop();
+    sEscExitTimeout.start(EXIT_TIMEOUT_MS);
+    safeMotorsStop();
+  }
+
+  ultrasonicUpdate();
+
+  switch (escPhase) {
+    case ESC_WAIT_VALID:
+      safeMotorsStop();
+      if (!usValid) return;
+
+      if (testUsNearWall()) {
+        safeMotorsTank(SPEED_TURN, -SPEED_TURN);
+        sEscTurn.start((uint32_t)(90.0f * MS_PER_DEG_ROBOT));
+        escPhase = ESC_TURN_90;
+      } else {
+        sEscExitDeb.stop();
+        escPhase = ESC_DRIVE_OUT;
+      }
+      break;
+
+    case ESC_TURN_90:
+      if (sEscTurn.expired()) {
+        safeMotorsStop();
+        ultrasonicReset();
+        escPhase = ESC_WAIT_VALID;
+      }
+      break;
+
+    case ESC_DRIVE_OUT:
+      safeMotorsTank(SPEED_FWD, SPEED_FWD);
+
+      if (crossingDebounced(sEscExitDeb, EXIT_CROSS_DEBOUNCE_MS)) {
+        safeMotorsStop();
+        markStageDone("Escaped box: exit crossing detected.");
+        escPhase = ESC_DONE;
+        return;
+      }
+      if (sEscExitTimeout.expired()) {
+        safeMotorsStop();
+        markStageDone("Escape timeout: no exit crossing.");
+        escPhase = ESC_DONE;
+        return;
+      }
+      break;
+
+    case ESC_DONE:
+    default:
+      safeMotorsStop();
+      break;
+  }
+}
+
+// ===================== Arduino setup/loop ====================
 void setup() {
   pinMode(PIN_ENABLE_BTN, INPUT_PULLUP);
-  pinMode(PIN_STATUS_LED, OUTPUT);
+  statusLedInit();
 
   pinMode(PIN_TAPE_LO, INPUT);
   pinMode(PIN_TAPE_LI, INPUT);
@@ -863,21 +800,8 @@ void setup() {
   pinMode(PIN_US_ECHO, INPUT);
   digitalWrite(PIN_US_TRIG, LOW);
 
-  pinMode(PIN_SWIVEL_MOTOR, OUTPUT);
-  swivelMotorOff();
-
   Serial.begin(115200);
-
   Serial.println("[NAV] boot");
-
-  Serial.print("[NAV] STAGE_MODE=");
-  Serial.print(STAGE_MODE);
-  Serial.print(" (");
-  Serial.print(stageName(STAGE_MODE));
-  Serial.println(")");
-
-  Serial.print("[NAV] TEST_ENABLE_MOTORS=");
-  Serial.println(TEST_ENABLE_MOTORS ? "true" : "false");
 
   analogReference(DEFAULT);
 
@@ -889,8 +813,12 @@ void setup() {
   pinMode(PIN_R_IN1, OUTPUT);
   pinMode(PIN_R_IN2, OUTPUT);
 
-  safeMotorsStop();
+  // Stepper enable + speed (same style as your test)
+  pinMode(PIN_SWIVEL_EN, OUTPUT);
+  digitalWrite(PIN_SWIVEL_EN, HIGH);
+  myStepper.setSpeed(15);
 
+  safeMotorsStop();
   stageDone = false;
   ultrasonicReset();
   lastTapeSide = 0;
@@ -903,16 +831,8 @@ void setup() {
 
   fullFsmResetRun();
 
-  Serial.print("L_ENA="); Serial.println(PIN_L_ENA);
-  Serial.print("L_IN1="); Serial.println(PIN_L_IN1);
-  Serial.print("L_IN2="); Serial.println(PIN_L_IN2);
-  Serial.print("R_ENA="); Serial.println(PIN_R_ENA);
-  Serial.print("R_IN1="); Serial.println(PIN_R_IN1);
-  Serial.print("R_IN2="); Serial.println(PIN_R_IN2);
-  Serial.print("US_TRIG="); Serial.println(PIN_US_TRIG);
-  Serial.print("US_ECHO="); Serial.println(PIN_US_ECHO);
-  Serial.print("SWIVEL_MOTOR="); Serial.println(PIN_SWIVEL_MOTOR);
-
+  Serial.print("[NAV] STAGE_MODE="); Serial.print(STAGE_MODE);
+  Serial.print(" ("); Serial.print(stageName(STAGE_MODE)); Serial.println(")");
   Serial.println("[NAV] ready");
 }
 
@@ -924,39 +844,25 @@ static int readAnalogSettled(uint8_t pin) {
   return analogRead(pin);
 }
 
-static void stageAnalogPinScan() {
-  static uint32_t last = 0;
-  if (millis() - last < 250) return;
-  last = millis();
-
-  for (int i = 0; i < 6; i++) {
-    int v = readAnalogSettled(A0 + i);
-    Serial.print("A"); Serial.print(i);
-    Serial.print("="); Serial.print(v);
-    Serial.print("  ");
-  }
-  Serial.println();
-}
-
 void loop() {
   switch (STAGE_MODE) {
-    case 0:  fullFsmLoop();                 break;
-    case 1:  stageTapeMonitorRaw();         break;
-    case 2:  stageUltrasonicMonitor();      break;
-    case 3:  stageExitUntilCross();         break;
-    case 4:  stageFollowUntilHog();         break;
-    case 5:  stageTurnTimed(90.0f);         break;
-    case 6:  stageTurnTimed(180.0f);        break;
-    case 7:  stageMotorsConstantForward();  break;
-    case 8:  stageMotorToggleDemo();        break;
-    case 9:  stageSwivelMotorTest();        break;
-    case 10: stageSwivelFireOnce();         break;
-    case 11: stageDriveUntilUsNear();       break;
+    case 0:  fullFsmLoop();                break;
+    case 1:  stageTapeMonitorRaw();        break;
+    case 2:  stageUltrasonicMonitor();     break;
+    case 3:  stageExitUntilCross();        break;
+    case 4:  stageFollowUntilHog();        break;
+    case 5:  stageTurnTimed(90.0f);        break;
+    case 6:  stageTurnTimed(180.0f);       break;
+    case 7:  stageMotorsConstantForward(); break;
+    case 8:  stageMotorToggleDemo();       break;
+    case 9:  stageSwivelMotorTest();       break;
+    case 10: stageSwivelFireOnce();        break;
+    case 11: stageDriveUntilUsNear();      break;
+    case 12: stageEscapeBoxUsThenCross();  break;
 
     default:
       safeMotorsStop();
-      swivelMotorOff();
-      digitalWrite(PIN_STATUS_LED, HIGH);
+      statusLedWrite(true);
       break;
   }
 }
