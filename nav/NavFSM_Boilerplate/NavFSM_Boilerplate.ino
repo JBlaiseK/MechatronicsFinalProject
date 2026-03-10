@@ -91,7 +91,7 @@ static const int16_t SPEED_SEARCH = 150;
 static const int16_t SPEED_DELTA  = 35;
 
 // Robot turn calibration ONLY (timed turns)
-static const float MS_PER_DEG_ROBOT = 5.0f;
+static const float MS_PER_DEG_ROBOT = 3.3f;
 
 // Tape crossing debounce
 static const uint32_t EXIT_CROSS_DEBOUNCE_MS = 1000;
@@ -338,13 +338,28 @@ static void ultrasonicReset() {
   usNearWall = false;
 }
 
+enum RetState {
+  RET_INIT = 0,
+  RET_TURN_180 = 1,
+  RET_DRIVE_1 = 2,
+  RET_TURN_90_CW = 3,
+  RET_DRIVE_2 = 4,
+  RET_TURN_90_CW2 = 5,
+  RET_REVERSE_FINAL = 6,
+  RET_DONE = 7
+};
+
+static RetState sRetState = RET_INIT;
+static SimpleTimer sRetTimer;
+static bool retStarted = false;
+
+
 // ========================== FULL FSM =========================
 typedef enum {
   F_IDLE_WAIT_ENABLE,
   CASE_12,
   CASE_4,
-  F_TURN_180_AFTER_FIRE,
-  F_DRIVE_TO_WALL,
+  CASE_RETURN_TO_START, // Replaced F_TURN_180_AFTER_FIRE and F_DRIVE_TO_WALL
   F_DONE
 } FullState;
 
@@ -358,31 +373,13 @@ static SimpleTimer fBackupTimer;
 
 static bool prevBtn = false;
 
-// static bool readEnableButtonPressedEdge() {
-//   bool cur = (digitalRead(PIN_ENABLE_BTN) == HIGH);
-//   bool edge = cur && !prevBtn;
-//   prevBtn = cur;
-//   return edge;
-// }
-
 static void fullFsmResetRun() {
   fullState = CASE_12;
-
-  // fExitDeb.stop();
-  // fExitTimeout.stop();
-  // fHogDeb.stop();
-  // fTurnTimer.stop();
-  // fBackupTimer.stop();
   stageDone = false; 
+  retStarted = false; // Reset the new stage's initialization flag
   ultrasonicReset();
   lastTapeSide = 0;
   safeMotorsStop();
-}
-
-static void startTimedTurnRight(float deg) {
-  uint32_t ms = (uint32_t)(deg * MS_PER_DEG_ROBOT);
-  safeMotorsTank(SPEED_TURN, -SPEED_TURN);
-  fTurnTimer.start(ms);
 }
 
 static void fullFsmLoop() {
@@ -391,10 +388,10 @@ static void fullFsmLoop() {
   switch (fullState) {
 
     case CASE_12:
-      stageEscapeBoxUsThenCross();  // Repeatedly run the stage
-      if (stageDone) {              // Wait until the stage marks itself done
-        stageDone = false;          // Reset the flag for the next stage
-        fullState = CASE_4;         // Move to the next state
+      stageEscapeBoxUsThenCross();
+      if (stageDone) {              
+        stageDone = false;          
+        fullState = CASE_4;         
       }
       break;
 
@@ -402,14 +399,16 @@ static void fullFsmLoop() {
       stageFollowUntilHog();
       if (stageDone) {
         stageDone = false;
-        fullState = F_TURN_180_AFTER_FIRE;
+        fullState = CASE_RETURN_TO_START; // Trigger the new return sequence
       }
       break;
 
-    case F_TURN_180_AFTER_FIRE:
-      break;
-
-    case F_DRIVE_TO_WALL:
+    case CASE_RETURN_TO_START:
+      stageReturnToStart();
+      if (stageDone) {
+        stageDone = false;
+        fullState = F_DONE;
+      }
       break;
 
     case F_DONE:
@@ -421,7 +420,7 @@ static void fullFsmLoop() {
       safeMotorsStop();
       break;
   }
-}
+} 
 // ============================================================
 // ===================== Stage/Test Runner =====================
 
@@ -460,6 +459,7 @@ static const char* stageName(uint8_t s) {
     case 11: return "DRIVE_UNTIL_US_NEAR";
     case 12: return "ESCAPE_BOX_US_THEN_CROSS";
     case 13: return "COMBO_EXIT_AND_FOLLOW";
+    case 14: return "RETURN_TO_START";
     default: return "UNKNOWN";
   }
 }
@@ -548,7 +548,7 @@ static SimpleTimer sLfTimer;
 static bool lfStarted = false;
 
 // --- Local Stage 4 Constants ---
-static const int16_t SPEED_FIND_LINE = 100; 
+static const int16_t SPEED_FIND_LINE = 150; 
 static const int16_t SPEED_BACKUP_LF = -120; // Slightly faster backup to ensure it clears the line
 
 static void stageFollowUntilHog() {
@@ -613,7 +613,7 @@ static void stageFollowUntilHog() {
       if (leftOuter && rightOuter && (leftInner || rightInner)) {
         safeMotorsStop();
         Serial.println("[STAGE 4] Hogline hit! Starting 2s reverse reset...");
-        sLfTimer.start(1000); // 2-second reverse
+        sLfTimer.start(900); // 2-second reverse
         sLfState = LF_REVERSE_AFTER_HOG;
       } else {
         lineFollowStep(); 
@@ -996,6 +996,113 @@ static void stageEscapeBoxUsThenCross() {
   }
 }
 
+// ---- Stage 14: Return to Start ----
+
+static void stageReturnToStart() {
+  if (stageDone) { stageIdleBlink(); return; }
+
+  // Ensure ultrasonic data is fresh if running as an isolated stage
+  ultrasonicUpdate();
+
+  if (!retStarted) {
+    retStarted = true;
+    sRetState = RET_INIT;
+  }
+
+  switch (sRetState) {
+    case RET_INIT:
+      Serial.println("[STAGE 14] Init: Turning 180.");
+      sRetTimer.start((uint32_t)(180.0f * MS_PER_DEG_ROBOT));
+      sRetState = RET_TURN_180;
+      break;
+
+    case RET_TURN_180:
+      safeMotorsTank(SPEED_TURN, -SPEED_TURN); // CW Turn
+      if (sRetTimer.expired()) {
+        safeMotorsStop();
+        Serial.println("[STAGE 14] 180 done. Line following to 20cm from wall.");
+        
+        // NEW: Reset tape memory before starting the line follow
+        lastTapeSide = 0; 
+        
+        // Brief pause to prevent motor current spikes on immediate reversal
+        sRetTimer.start(200); 
+        sRetState = RET_DRIVE_1;
+      }
+      break;
+
+    case RET_DRIVE_1:
+      if (sRetTimer.running && !sRetTimer.expired()) {
+        safeMotorsStop(); // Waiting out the pause
+      } else {
+        
+        // NEW: Use the line follower instead of blind forward drive
+        lineFollowStep(); 
+        
+        if (usValid && usDistanceCm <= 20.0f) {
+          safeMotorsStop();
+          Serial.println("[STAGE 14] Wall 1 reached. Turning 90 CW.");
+          sRetTimer.start((uint32_t)(90.0f * MS_PER_DEG_ROBOT));
+          sRetState = RET_TURN_90_CW;
+        }
+      }
+      break;
+
+    case RET_TURN_90_CW:
+      safeMotorsTank(SPEED_TURN, -SPEED_TURN); // CW Turn
+      if (sRetTimer.expired()) {
+        safeMotorsStop();
+        Serial.println("[STAGE 14] 90 done. Driving to 23cm from wall.");
+        sRetTimer.start(200); // Brief pause
+        sRetState = RET_DRIVE_2;
+      }
+      break;
+
+    case RET_DRIVE_2:
+      if (sRetTimer.running && !sRetTimer.expired()) {
+        safeMotorsStop(); // Waiting out the pause
+      } else {
+        // Kept intact: blind forward drive
+        safeMotorsTank(SPEED_FWD, SPEED_FWD); 
+        if (usValid && usDistanceCm <= 23.0f) {
+          safeMotorsStop();
+          Serial.println("[STAGE 14] Wall 2 reached. Turning 90 CW.");
+          
+          sRetTimer.start((uint32_t)(90.0f * MS_PER_DEG_ROBOT)); 
+          sRetState = RET_TURN_90_CW2;
+        }
+      }
+      break;
+
+    case RET_TURN_90_CW2:
+      safeMotorsTank(SPEED_TURN, -SPEED_TURN); // CW Turn
+      if (sRetTimer.expired()) {
+        safeMotorsStop();
+        Serial.println("[STAGE 14] Final 90 done. Reversing for 2 seconds.");
+        
+        // Start the 2-second reverse timer
+        sRetTimer.start(2000); 
+        sRetState = RET_REVERSE_FINAL;
+      }
+      break;
+
+    case RET_REVERSE_FINAL:
+      // Drive backward using the standard forward speed, inverted
+      safeMotorsTank(-SPEED_FWD, -SPEED_FWD); 
+      
+      if (sRetTimer.expired()) {
+        safeMotorsStop();
+        sRetState = RET_DONE;
+        markStageDone("Returned to start and backed into the box.");
+      }
+      break;
+
+    case RET_DONE:
+      safeMotorsStop();
+      break;
+  }
+}
+
 // ===================== Arduino setup/loop ====================
 void setup() {
   // pinMode(PIN_ENABLE_BTN, INPUT_PULLDOWN);
@@ -1076,6 +1183,7 @@ void loop() {
     case 10: stageSwivelFireOnce();        break;
     case 11: stageDriveUntilUsNear();      break;
     case 12: stageEscapeBoxUsThenCross();  break;
+    case 14: stageReturnToStart();         break;
 
     default:
       safeMotorsStop();
