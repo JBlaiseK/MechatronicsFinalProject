@@ -448,17 +448,13 @@ static const char* stageName(uint8_t s) {
     case 0:  return "FULL_FSM";
     case 1:  return "TAPE_MONITOR_RAW";
     case 2:  return "ULTRASONIC_MONITOR";
-    case 3:  return "EXIT_BOX_UNTIL_CROSS";
     case 4:  return "LINE_FOLLOW_UNTIL_HOG";
     case 5:  return "TURN_90_TIMED";
     case 6:  return "TURN_180_TIMED";
     case 7:  return "MOTORS_CONSTANT_FORWARD";
-    case 8:  return "MOTORS_TOGGLE_DIRECTION_DEMO";
     case 9:  return "SWIVEL_STEPPER_TEST";
     case 10: return "SWIVEL_FIRE_ONCE";
-    case 11: return "DRIVE_UNTIL_US_NEAR";
     case 12: return "ESCAPE_BOX_US_THEN_CROSS";
-    case 13: return "COMBO_EXIT_AND_FOLLOW";
     case 14: return "RETURN_TO_START";
     default: return "UNKNOWN";
   }
@@ -505,33 +501,33 @@ static void stageUltrasonicMonitor() {
   Serial.print(" near="); Serial.println(usNearWall ? "Y" : "N");
 }
 
-// ---- Stage 3: exit box until crossing ----
-static SimpleTimer sExitDeb;
-static SimpleTimer sExitTimeout;
+// // ---- Stage 3: exit box until crossing ----
+// static SimpleTimer sExitDeb;
+// static SimpleTimer sExitTimeout;
 
-static void stageExitUntilCross() {
-  if (stageDone) { stageIdleBlink(); return; }
+// static void stageExitUntilCross() {
+//   if (stageDone) { stageIdleBlink(); return; }
 
-  static bool started = false;
-  if (!started) {
-    started = true;
-    Serial.println("[STAGE] Exit box until crossing.");
-    sExitDeb.stop();
-    sExitTimeout.start(EXIT_TIMEOUT_MS);
-  }
+//   static bool started = false;
+//   if (!started) {
+//     started = true;
+//     Serial.println("[STAGE] Exit box until crossing.");
+//     sExitDeb.stop();
+//     sExitTimeout.start(EXIT_TIMEOUT_MS);
+//   }
 
-  safeMotorsTank(SPEED_FWD, SPEED_FWD);
+//   safeMotorsTank(SPEED_FWD, SPEED_FWD);
 
-  if (crossingDebounced(sExitDeb, EXIT_CROSS_DEBOUNCE_MS)) {
-    markStageDone("Exit crossing detected.");
-    return;
-  }
+//   if (crossingDebounced(sExitDeb, EXIT_CROSS_DEBOUNCE_MS)) {
+//     markStageDone("Exit crossing detected.");
+//     return;
+//   }
 
-  if (sExitTimeout.expired()) {
-    markStageDone("Exit timeout (no crossing).");
-    return;
-  }
-}
+//   if (sExitTimeout.expired()) {
+//     markStageDone("Exit timeout (no crossing).");
+//     return;
+//   }
+// }
 
 // ---- Stage 4: line follow until hogline ----
 enum LfState {
@@ -546,6 +542,9 @@ enum LfState {
 static LfState sLfState = LF_INIT;
 static SimpleTimer sLfTimer;
 static bool lfStarted = false;
+
+
+
 
 // --- Local Stage 4 Constants ---
 static const int16_t SPEED_FIND_LINE = 150; 
@@ -636,6 +635,9 @@ static void stageFollowUntilHog() {
   }
 }
 
+
+
+
 // ---- Stage 5/6: timed turns ----
 static SimpleTimer sTurn;
 static bool sTurnStarted = false;
@@ -689,24 +691,24 @@ static bool buttonEdgeForToggle() {
   return edge;
 }
 
-static void     stageMotorToggleDemo() {
-  if (!TEST_ENABLE_MOTORS) { safeMotorsStop(); return; }
+// static void     stageMotorToggleDemo() {
+//   if (!TEST_ENABLE_MOTORS) { safeMotorsStop(); return; }
 
-  if (buttonEdgeForToggle()) {
-    if (dirState == WAITING) { dirState = RUNNING; lastToggleMs = millis(); }
-    else { dirState = WAITING; }
-  }
+//   if (buttonEdgeForToggle()) {
+//     if (dirState == WAITING) { dirState = RUNNING; lastToggleMs = millis(); }
+//     else { dirState = WAITING; }
+//   }
 
-  if (dirState == WAITING) { safeMotorsStop(); return; }
+//   if (dirState == WAITING) { safeMotorsStop(); return; }
 
-  if (millis() - lastToggleMs >= TIME_DELAY_MS) {
-    lastToggleMs += TIME_DELAY_MS;
-    isForward = !isForward;
-  }
+//   if (millis() - lastToggleMs >= TIME_DELAY_MS) {
+//     lastToggleMs += TIME_DELAY_MS;
+//     isForward = !isForward;
+//   }
 
-  if (isForward) safeMotorsTank(SPEED_FWD, SPEED_FWD);
-  else safeMotorsTank(-SPEED_FWD, -SPEED_FWD);
-}
+//   if (isForward) safeMotorsTank(SPEED_FWD, SPEED_FWD);
+//   else safeMotorsTank(-SPEED_FWD, -SPEED_FWD);
+// }
 
 // ---- Stage 9: swivel stepper test (like your sketch) ----
 static void stageSwivelMotorTest() {
@@ -735,24 +737,24 @@ static void stageSwivelFireOnce() {
   }
 }
 
-// ---- Stage 11: drive until ultrasonic near wall ----
-static void stageDriveUntilUsNear() {
-  if (stageDone) { stageIdleBlink(); return; }
+// // ---- Stage 11: drive until ultrasonic near wall ----
+// static void stageDriveUntilUsNear() {
+//   if (stageDone) { stageIdleBlink(); return; }
 
-  static bool started = false;
-  if (!started) {
-    started = true;
-    Serial.println("[STAGE11] Drive forward until ultrasonic near wall.");
-    ultrasonicReset();
-  }
+//   static bool started = false;
+//   if (!started) {
+//     started = true;
+//     Serial.println("[STAGE11] Drive forward until ultrasonic near wall.");
+//     ultrasonicReset();
+//   }
 
-  ultrasonicUpdate();
-  safeMotorsTank(SPEED_FWD, SPEED_FWD);
+//   ultrasonicUpdate();
+//   safeMotorsTank(SPEED_FWD, SPEED_FWD);
 
-  if (testUsNearWall()) {
-    markStageDone("Near wall detected.");
-  }
-}
+//   if (testUsNearWall()) {
+//     markStageDone("Near wall detected.");
+//   }
+// }
 
 // ---- Stage 12: blahblah ----
 
@@ -1173,15 +1175,15 @@ void loop() {
     case 0:  fullFsmLoop();                break;
     case 1:  stageTapeMonitorRaw();        break;
     case 2:  stageUltrasonicMonitor();     break;
-    case 3:  stageExitUntilCross();        break;
+
     case 4:  stageFollowUntilHog();        break;
     case 5:  stageTurnTimed(90.0f);        break;
     case 6:  stageTurnTimed(180.0f);       break;
     case 7:  stageMotorsConstantForward(); break;
-    case 8:  stageMotorToggleDemo();       break;
+
     case 9:  stageSwivelMotorTest();       break;
     case 10: stageSwivelFireOnce();        break;
-    case 11: stageDriveUntilUsNear();      break;
+
     case 12: stageEscapeBoxUsThenCross();  break;
     case 14: stageReturnToStart();         break;
 
