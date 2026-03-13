@@ -13,23 +13,26 @@ struct SimpleTimer {
 };
 
 // ===================== STAGE SELECT HERE =====================
-// 0 = FULL_FSM
-// 1 = TAPE_MONITOR_RAW
-// 2 = ULTRASONIC_MONITOR
-// 3 = EXIT_BOX_UNTIL_CROSS
-// 4 = LINE_FOLLOW_UNTIL_HOG
-// 5 = TURN_90_TIMED
-// 6 = TURN_180_TIMED
-// 7 = MOTORS_CONSTANT_FORWARD
-// 8 = MOTORS_TOGGLE_DIRECTION_DEMO
-// 9 = SWIVEL_STEPPER_TEST (step +90 every second)
-// 10 = SWIVEL_FIRE_ONCE (step +90 once)
-// 11 = DRIVE_UNTIL_US_NEAR
-// 12 = ESCAPE_BOX_US_THEN_CROSS (UPDATED: turn-until-clear + backup-if-too-close, then drive to exit tape)
+//  case 0:  fullFsmLoop();            
+//  case 1:  stageTapeMonitorRaw();       
+//  case 2:  stageUltrasonicMonitor();   
 
+//  case 4:  stageFollowUntilHog();       
+//  case 5:  stageTurnTimed(90.0f);      
+//  case 6:  stageTurnTimed(180.0f);     
+//  case 7:  stageMotorsConstantForward();
+
+//  case 9:  stageSwivelMotorTest();     
+//  case 10: stageSwivelFireOnce();   
+
+//  case 12: stageEscapeBoxUsThenCross();
+//  case 14: stageReturnToStart();        
+
+
+// TOGGLE WHICH TEST TO RUN
 static const uint8_t STAGE_MODE = 0;
 
-// Safety gate: robot will not move unless true.
+// Robot will not move unless true.
 static const bool TEST_ENABLE_MOTORS = true;
 
 // ========================= Pin Map ===========================
